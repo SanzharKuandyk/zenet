@@ -1,11 +1,13 @@
 const std = @import("std");
+const areion = @import("areion");
+const zenet = @import("zenet");
 const Conn = @import("connection.zig").Connection;
 const Packet = @import("packet.zig").Packet;
+const Challenge = @import("packet.zig").Challenge;
 const ServerError = @import("error.zig").ServerError;
 const RecentNonces = @import("protection.zig").RecentNonces;
 
-pub const MAX_CLIENTS = 1024;
-pub const NONCE_WINDOW = 256;
+const deserialize = @import("packet.zig").deserialize;
 
 pub const ServerConfig = struct {
     protocol_id: u64,
@@ -21,7 +23,7 @@ pub const Server = struct {
     protocol_id: u64,
     start_time: std.time.Instant,
     current_time: std.time.Instant,
-    clients: [MAX_CLIENTS]?Conn,
+    clients: [zenet.MAX_CLIENTS]?Conn,
     // What type should be here?
     free_slots: std.ArrayList(u32),
     // free slot in clients array
@@ -29,9 +31,14 @@ pub const Server = struct {
     // pending handshakes (addr, cid)
     pending: std.AutoArrayHashMap(std.net.Address, u64),
     // recent nonces
-    recent_nonces: RecentNonces(NONCE_WINDOW),
+    recent_nonces: RecentNonces(zenet.NONCE_WINDOW),
+    challenge_seq: u64,
+    challenge_key: [zenet.CHALLENGE_KEY_SIZE]u8,
 
     pub fn init(allocator: std.mem.Allocator, config: ServerConfig) !Server {
+        var ckey: [zenet.CHALLENGE_KEY_SIZE]u8 = undefined;
+        std.crypto.random.bytes(&ckey);
+
         return .{
             .protocol_id = config.protocol_id,
             .start_time = try std.time.Instant.now(),
@@ -40,11 +47,13 @@ pub const Server = struct {
             .free_slots = std.ArrayList(u32).init(allocator),
             .next_free_slot = 0,
             .pending = std.AutoArrayHashMap(std.net.Address, u64).init(allocator),
-            .recent_nonces = RecentNonces(NONCE_WINDOW).init(allocator),
+            .recent_nonces = RecentNonces(zenet.NONCE_WINDOW).init(allocator),
+            .challenge_seq = 0,
+            .challenge_key = ckey,
         };
     }
 
-    pub fn get_current_time(self: *const Server) u64 {
+    pub fn getCurrentTime(self: *const Server) u64 {
         return self.current_time.since(self.start_time);
     }
 
@@ -52,7 +61,9 @@ pub const Server = struct {
         self.current_time = try std.time.Instant.now();
     }
 
-    pub fn handle_packet(self: *Server, p: Packet) ServerError!void {
+    pub fn handlePacket(self: *Server, addr: std.net.Address, buffer: []u8) ServerError!void {
+        const p = deserialize(buffer);
+
         switch (p) {
             .ConnectionRequest => |req| {
                 if (self.protocol_id != req.protocol_id) {
@@ -67,6 +78,9 @@ pub const Server = struct {
                     return ServerError.InvalidPacket;
                 }
                 self.recent_nonces.insert(req.client_nonce);
+
+                self.challenge_seq += 1;
+                const challenge = try Packet.generateChallenge(cid, user_data, challenge_seq, challenge_key);
             },
             .Payload => |payload| {
                 payload;

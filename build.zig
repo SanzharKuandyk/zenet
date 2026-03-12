@@ -83,6 +83,12 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    // Dependencies
+    const areion_dep = b.dependency("areion", .{ .target = target, .optimize = optimize });
+    const areion_mod = areion_dep.artifact("areion").root_module;
+    mod.addImport("areion", areion_mod);
+    exe.root_module.addImport("areion", areion_mod);
+
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
     // step). By default the install prefix is `zig-out/` but can be overridden

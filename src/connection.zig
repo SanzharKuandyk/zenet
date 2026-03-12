@@ -14,6 +14,8 @@ pub const Connection = struct {
     cid: u64,
     state: ConnectionState,
     addr: std.net.Address,
+    last_packet_received_at: u64,
+    last_packet_send_at: u64,
     expires_at: u64,
     user_data: [USER_DATA_BYTES]u8,
 };
