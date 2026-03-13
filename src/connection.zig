@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const USER_DATA_BYTES = 256;
+const USER_DATA_SIZE = @import("root.zig").USER_DATA_SIZE;
 
 pub const ConnectionState = enum {
     Disconnected,
@@ -9,13 +9,17 @@ pub const ConnectionState = enum {
 };
 
 pub const Connection = struct {
-    valid: bool,
-    // Client Id
     cid: u64,
-    state: ConnectionState,
     addr: std.net.Address,
-    last_packet_received_at: u64,
-    last_packet_send_at: u64,
+    last_recv: u64,
+    last_send: u64,
+    user_data: [USER_DATA_SIZE]u8,
+};
+
+pub const PendingConnection = struct {
+    cid: u64,
+    client_nonce: u64,
+    sequence: u64,
     expires_at: u64,
-    user_data: [USER_DATA_BYTES]u8,
+    user_data: [USER_DATA_SIZE]u8,
 };

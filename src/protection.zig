@@ -1,6 +1,6 @@
 // Protection replay
 const std = @import("std");
-const RingQueue = @import("ring_buffer.zig");
+const RingQueue = @import("ring_buffer.zig").RingQueue;
 
 pub fn RecentNonces(comptime Window: usize) type {
     return struct {

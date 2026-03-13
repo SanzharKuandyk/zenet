@@ -2,9 +2,12 @@
 // 2. (server) Challenge
 // 3. (client) ConnectionResponse
 
+const std = @import("std");
 const ServerError = @import("error.zig");
-const USER_DATA_SIZE = @import("zenet").USER_DATA_SIZE;
-const CHALLENGE_KEY_SIZE = @import("zenet").CHALLENGE_KEY_SIZE;
+const USER_DATA_SIZE = @import("root.zig").USER_DATA_SIZE;
+const CHALLENGE_KEY_SIZE = @import("root.zig").CHALLENGE_KEY_SIZE;
+const SECRET_KEY_SIZE = @import("root.zig").SECRET_KEY_SIZE;
+const MAX_PAYLOAD_SIZE = @import("root.zig").MAX_PAYLOAD_SIZE;
 
 pub const ChallengeToken = [16]u8;
 
@@ -26,11 +29,45 @@ pub const Packet = union(enum) {
     Disconnect,
 
     pub fn generateChallenge(
+        secret_key: *const [SECRET_KEY_SIZE]u8,
         cid: u64,
-        user_data: *[USER_DATA_SIZE]u8,
+        client_nonce: u64,
+        user_data: *const [USER_DATA_SIZE]u8,
         challenge_seq: u64,
-        challenge_key: *[CHALLENGE_KEY_SIZE]u8,
-    ) ServerError!Challenge {}
+        expires_at: u64,
+    ) Challenge {
+        const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
+
+        var msg: [8 + 8 + 8 + 8 + USER_DATA_SIZE]u8 = undefined;
+        var i: usize = 0;
+
+        std.mem.writeInt(u64, msg[i..][0..8], cid, .big);
+        i += 8;
+
+        std.mem.writeInt(u64, msg[i..][0..8], client_nonce, .big);
+        i += 8;
+
+        std.mem.writeInt(u64, msg[i..][0..8], challenge_seq, .big);
+        i += 8;
+
+        std.mem.writeInt(u64, msg[i..][0..8], expires_at, .big);
+        i += 8;
+
+        @memcpy(msg[i..][0..USER_DATA_SIZE], user_data);
+        i += USER_DATA_SIZE;
+
+        var full_mac: [HmacSha256.mac_length]u8 = undefined;
+        HmacSha256.create(full_mac[0..], msg[0..i], secret_key[0..]);
+
+        var token: ChallengeToken = undefined;
+        @memcpy(token[0..], full_mac[0..token.len]); // truncate to 16 bytes
+
+        return .{
+            .sequence = challenge_seq,
+            .expires_at = expires_at,
+            .token = token,
+        };
+    }
 };
 
 pub const PacketBytes = [@sizeOf(Packet)]u8;
@@ -46,12 +83,12 @@ pub fn deserialize(bytes: PacketBytes) Packet {
 pub const ConnectionRequest = struct {
     client_nonce: u64,
     protocol_id: u32,
-    expires_at: u64,
     user_data: [USER_DATA_SIZE]u8,
 };
 
 pub const Challenge = struct {
     sequence: u64,
+    expires_at: u64,
     token: ChallengeToken,
 };
 
@@ -61,5 +98,5 @@ pub const ConnectionResponse = struct {
 };
 
 pub const Payload = struct {
-    body: [1024]u8,
+    body: [MAX_PAYLOAD_SIZE]u8,
 };
