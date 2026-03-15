@@ -4,7 +4,7 @@
 
 const std = @import("std");
 const ServerError = @import("error.zig");
-const USER_DATA_SIZE = @import("root.zig").USER_DATA_SIZE;
+const ConnectToken = @import("protection.zig").ConnectToken;
 const CHALLENGE_KEY_SIZE = @import("root.zig").CHALLENGE_KEY_SIZE;
 const SECRET_KEY_SIZE = @import("root.zig").SECRET_KEY_SIZE;
 const MAX_PAYLOAD_SIZE = @import("root.zig").MAX_PAYLOAD_SIZE;
@@ -32,13 +32,12 @@ pub const Packet = union(enum) {
         secret_key: *const [SECRET_KEY_SIZE]u8,
         cid: u64,
         client_nonce: u64,
-        user_data: *const [USER_DATA_SIZE]u8,
         challenge_seq: u64,
         expires_at: u64,
     ) Challenge {
         const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
 
-        var msg: [8 + 8 + 8 + 8 + USER_DATA_SIZE]u8 = undefined;
+        var msg: [8 + 8 + 8 + 8]u8 = undefined;
         var i: usize = 0;
 
         std.mem.writeInt(u64, msg[i..][0..8], cid, .big);
@@ -52,9 +51,6 @@ pub const Packet = union(enum) {
 
         std.mem.writeInt(u64, msg[i..][0..8], expires_at, .big);
         i += 8;
-
-        @memcpy(msg[i..][0..USER_DATA_SIZE], user_data);
-        i += USER_DATA_SIZE;
 
         var full_mac: [HmacSha256.mac_length]u8 = undefined;
         HmacSha256.create(full_mac[0..], msg[0..i], secret_key[0..]);
@@ -83,7 +79,9 @@ pub fn deserialize(bytes: PacketBytes) Packet {
 pub const ConnectionRequest = struct {
     client_nonce: u64,
     protocol_id: u32,
-    user_data: [USER_DATA_SIZE]u8,
+    // Optional ConnectToken 
+    // depends on secure config
+    token: ?ConnectToken,
 };
 
 pub const Challenge = struct {

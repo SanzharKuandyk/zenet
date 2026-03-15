@@ -9,6 +9,8 @@ pub fn main() !void {
         1,
         5000,
         10000,
+        .empty,
+        false,
         null,
     );
     var server = try zenet.server.Server.init(page_alloc, cfg);
