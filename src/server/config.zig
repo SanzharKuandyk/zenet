@@ -1,7 +1,7 @@
 const std = @import("std");
 
-const CHALLENGE_KEY_SIZE = @import("root.zig").CHALLENGE_KEY_SIZE;
-const SECRET_KEY_SIZE = @import("root.zig").SECRET_KEY_SIZE;
+const CHALLENGE_KEY_SIZE = @import("../root.zig").CHALLENGE_KEY_SIZE;
+const SECRET_KEY_SIZE = @import("../root.zig").SECRET_KEY_SIZE;
 
 pub const ServerConfig = struct {
     protocol_id: u64,

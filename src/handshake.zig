@@ -1,6 +1,5 @@
 const std = @import("std");
 const AddressKey = @import("addr.zig").AddressKey;
-const ClientId = @import("connection.zig").ClientId;
 const SECRET_KEY_SIZE = @import("root.zig").SECRET_KEY_SIZE;
 const CHALLENGE_KEY_SIZE = @import("root.zig").CHALLENGE_KEY_SIZE;
 
@@ -10,7 +9,7 @@ pub const ChallengeToken = [16]u8;
 /// Binds: cid, client_nonce, sequence, expires_at.
 pub fn generateChallengeToken(
     challenge_key: *const [CHALLENGE_KEY_SIZE]u8,
-    cid: ClientId,
+    cid: u64,
     client_nonce: u64,
     challenge_seq: u64,
     expires_at: u64,
@@ -35,7 +34,7 @@ pub fn generateChallengeToken(
 pub fn verifyChallengeToken(
     token: ChallengeToken,
     challenge_key: *const [CHALLENGE_KEY_SIZE]u8,
-    cid: ClientId,
+    cid: u64,
     client_nonce: u64,
     sequence: u64,
     expires_at: u64,
@@ -50,14 +49,14 @@ pub fn DefaultConnectToken(comptime user_data_size: usize) type {
     return struct {
         const Self = @This();
 
-        client_id: ClientId,
+        client_id: u64,
         expires_at: u64,
         public_addresses: []const std.net.Address,
         user_data: [user_data_size]u8,
         mac: [16]u8,
 
         pub fn create(
-            client_id: ClientId,
+            client_id: u64,
             expires_at: u64,
             public_addresses: []const std.net.Address,
             user_data: [user_data_size]u8,

@@ -15,8 +15,10 @@ pub const Options = struct {
     ConnectToken: type = void,
 };
 
-pub const ClientId = @import("connection.zig").ClientId;
-pub const Server = @import("server.zig").Server;
-pub const ServerConfig = @import("config.zig").ServerConfig;
-pub const ServerError = @import("error.zig").ServerError;
+pub const Client = @import("client/client.zig").Client;
+pub const ClientConfig = @import("client/client.zig").ClientConfig;
+pub const ClientError = @import("client/client.zig").ClientError;
+pub const Server = @import("server/server.zig").Server;
+pub const ServerConfig = @import("server/config.zig").ServerConfig;
+pub const ServerError = @import("server/error.zig").ServerError;
 pub const handshake = @import("handshake.zig");

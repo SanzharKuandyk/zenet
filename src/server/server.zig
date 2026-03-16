@@ -1,15 +1,14 @@
 const std = @import("std");
-const root = @import("root.zig");
+const root = @import("../root.zig");
 const connection_mod = @import("connection.zig");
-const packet_mod = @import("packet.zig");
-const handshake = @import("handshake.zig");
+const packet_mod = @import("../packet.zig");
+const handshake = @import("../handshake.zig");
 const Options = root.Options;
-const AddressKey = @import("addr.zig").AddressKey;
-const ClientId = connection_mod.ClientId;
+const AddressKey = @import("../addr.zig").AddressKey;
 const ServerError = @import("error.zig").ServerError;
 const ServerConfig = @import("config.zig").ServerConfig;
-const RingQueue = @import("ring_buffer.zig").RingQueue;
-const RecentNonces = @import("nonce.zig").RecentNonces;
+const RingQueue = @import("../ring_buffer.zig").RingQueue;
+const RecentNonces = @import("../nonce.zig").RecentNonces;
 
 const CHALLENGE_KEY_SIZE = root.CHALLENGE_KEY_SIZE;
 const SECRET_KEY_SIZE = root.SECRET_KEY_SIZE;
@@ -34,16 +33,16 @@ pub fn Server(comptime opts: Options) type {
 
         pub const Event = union(enum) {
             ClientConnected: struct {
-                cid: ClientId,
+                cid: u64,
                 addr: std.net.Address,
                 user_data: ?[opts.user_data_size]u8,
             },
             ClientDisconnected: struct {
-                cid: ClientId,
+                cid: u64,
                 addr: std.net.Address,
             },
             PayloadReceived: struct {
-                cid: ClientId,
+                cid: u64,
                 addr: std.net.Address,
                 payload: packet_mod.Payload(opts),
             },
@@ -72,8 +71,8 @@ pub fn Server(comptime opts: Options) type {
         current_time: std.time.Instant,
 
         clients: [opts.max_clients]?Conn,
-        recycled_slots: std.ArrayList(ClientId), // disconnected slots available for reuse
-        slot_cursor: ClientId, // high-water mark: next never-used index in clients[]
+        recycled_slots: std.ArrayList(u64), // disconnected slots available for reuse
+        slot_cursor: u64, // high-water mark: next never-used index in clients[]
         pending: std.AutoArrayHashMap(AddressKey, PendingConn),
 
         outgoing: RingQueue(Outgoing, opts.outgoing_queue_size),
@@ -163,7 +162,7 @@ pub fn Server(comptime opts: Options) type {
                     if (self.recent_nonces.contains(fields.client_nonce)) return ServerError.InvalidPacket;
                     _ = try self.recent_nonces.insert(fields.client_nonce);
 
-                    const cid: ClientId = if (self.recycled_slots.pop()) |slot| slot else blk: {
+                    const cid: u64 = if (self.recycled_slots.pop()) |slot| slot else blk: {
                         if (self.slot_cursor >= opts.max_clients) return ServerError.ServerFull;
                         const s = self.slot_cursor;
                         self.slot_cursor += 1;
@@ -210,7 +209,7 @@ pub fn Server(comptime opts: Options) type {
 
                     _ = self.pending.swapRemove(AddressKey.fromAddress(addr));
 
-                    self.clients[pending.cid] = Conn{
+                    self.clients[@intCast(pending.cid)] = Conn{
                         .cid = pending.cid,
                         .addr = addr,
                         .last_recv = self.getCurrentTime(),
