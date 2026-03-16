@@ -11,6 +11,8 @@ pub const Options = struct {
     events_queue_size: usize = 256,
     user_data_size: usize = 256,
     max_payload_size: usize = 1024,
+    /// User-provided ConnectToken type. `void` = use zenet's built-in default.
+    ConnectToken: type = void,
 };
 
 pub const ClientId = @import("connection.zig").ClientId;

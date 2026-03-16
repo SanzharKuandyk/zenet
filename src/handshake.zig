@@ -1,7 +1,6 @@
 const std = @import("std");
 const AddressKey = @import("addr.zig").AddressKey;
 const ClientId = @import("connection.zig").ClientId;
-const Options = @import("root.zig").Options;
 const SECRET_KEY_SIZE = @import("root.zig").SECRET_KEY_SIZE;
 const CHALLENGE_KEY_SIZE = @import("root.zig").CHALLENGE_KEY_SIZE;
 
@@ -47,21 +46,21 @@ pub fn verifyChallengeToken(
 
 /// Secure connection token issued by a matchmaking/lobby server.
 /// Sent by the client inside a SecureConnectionRequest.
-pub fn ConnectToken(comptime opts: Options) type {
+pub fn DefaultConnectToken(comptime user_data_size: usize) type {
     return struct {
         const Self = @This();
 
         client_id: ClientId,
         expires_at: u64,
         public_addresses: []const std.net.Address,
-        user_data: [opts.user_data_size]u8,
+        user_data: [user_data_size]u8,
         mac: [16]u8,
 
         pub fn create(
             client_id: ClientId,
             expires_at: u64,
             public_addresses: []const std.net.Address,
-            user_data: [opts.user_data_size]u8,
+            user_data: [user_data_size]u8,
             secret_key: *const [SECRET_KEY_SIZE]u8,
         ) Self {
             var token = Self{

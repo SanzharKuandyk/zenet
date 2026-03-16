@@ -39,10 +39,14 @@ pub const PlainConnectionRequest = struct {
 };
 
 pub fn SecureConnectionRequest(comptime opts: Options) type {
+    const TokenType = if (opts.ConnectToken == void)
+        handshake.DefaultConnectToken(opts.user_data_size)
+    else
+        opts.ConnectToken;
     return struct {
         protocol_id: u32,
         client_nonce: u64,
-        token: handshake.ConnectToken(opts),
+        token: TokenType,
     };
 }
 

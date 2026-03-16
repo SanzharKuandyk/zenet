@@ -15,6 +15,15 @@ const CHALLENGE_KEY_SIZE = root.CHALLENGE_KEY_SIZE;
 const SECRET_KEY_SIZE = root.SECRET_KEY_SIZE;
 
 pub fn Server(comptime opts: Options) type {
+    comptime {
+        if (opts.ConnectToken != void) {
+            if (!@hasDecl(opts.ConnectToken, "verify"))
+                @compileError("ConnectToken must have: pub fn verify(*const @This(), u64, *const [32]u8) bool");
+            if (!@hasField(opts.ConnectToken, "user_data"))
+                @compileError("ConnectToken must have: user_data: [opts.user_data_size]u8");
+        }
+    }
+
     const Conn = connection_mod.Connection(opts);
     const PendingConn = connection_mod.PendingConnection(opts);
     const Pkt = packet_mod.Packet(opts);

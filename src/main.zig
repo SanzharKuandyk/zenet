@@ -7,7 +7,7 @@ const opts: zenet.Options = .{
     .max_payload_size = 512,
 };
 
-const MyServer = zenet.Server(opts);
+const Server = zenet.Server(opts);
 
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
@@ -23,7 +23,7 @@ pub fn main() !void {
         null,
     );
 
-    var srv = try MyServer.init(allocator, cfg);
+    var srv = try Server.init(allocator, cfg);
     defer srv.deinit();
 
     const now = try std.time.Instant.now();
