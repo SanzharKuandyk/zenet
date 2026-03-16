@@ -1,25 +1,24 @@
 const std = @import("std");
+const Options = @import("root.zig").Options;
 
-const USER_DATA_SIZE = @import("root.zig").USER_DATA_SIZE;
+pub const ClientId = usize;
 
-pub const ConnectionState = enum {
-    Disconnected,
-    Pending,
-    Connected,
-};
+pub fn Connection(comptime opts: Options) type {
+    return struct {
+        cid: ClientId,
+        addr: std.net.Address,
+        last_recv: u64,
+        last_send: u64,
+        user_data: ?[opts.user_data_size]u8,
+    };
+}
 
-pub const Connection = struct {
-    cid: u64,
-    addr: std.net.Address,
-    last_recv: u64,
-    last_send: u64,
-    user_data: [USER_DATA_SIZE]u8,
-};
-
-pub const PendingConnection = struct {
-    cid: u64,
-    client_nonce: u64,
-    sequence: u64,
-    expires_at: u64,
-    user_data: [USER_DATA_SIZE]u8,
-};
+pub fn PendingConnection(comptime opts: Options) type {
+    return struct {
+        cid: ClientId,
+        client_nonce: u64,
+        sequence: u64,
+        expires_at: u64,
+        user_data: ?[opts.user_data_size]u8,
+    };
+}

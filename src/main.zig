@@ -1,18 +1,31 @@
 const std = @import("std");
 const zenet = @import("zenet");
-const ServerConfig = zenet.ServerConfig;
 
-// zig build run
+const opts: zenet.Options = .{
+    .max_clients = 64,
+    .user_data_size = 256,
+    .max_payload_size = 512,
+};
+
+const MyServer = zenet.Server(opts);
+
 pub fn main() !void {
-    const page_alloc = std.heap.page_allocator;
-    const cfg = ServerConfig.init(
+    const allocator = std.heap.page_allocator;
+
+    const challenge_key = [_]u8{0} ** 32;
+    const cfg = zenet.ServerConfig.init(
         1,
         5000,
         10000,
-        .empty,
+        &.{},
         false,
+        challenge_key,
         null,
     );
-    var server = try zenet.server.Server.init(page_alloc, cfg);
-    try server.update();
+
+    var srv = try MyServer.init(allocator, cfg);
+    defer srv.deinit();
+
+    const now = try std.time.Instant.now();
+    try srv.update(now);
 }

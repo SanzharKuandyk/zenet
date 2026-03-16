@@ -31,12 +31,7 @@
     // `zig build --fetch` can be used to fetch all dependencies of a package, recursively.
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
-    .dependencies = .{
-        .areion = .{
-            .url = "git+https://github.com/jedisct1/areion#cf9c2c1cde3cc6cdffe07dd39ff8a271f8d255d0",
-            .hash = "areion-0.1.0-3SZbPh_vAQDB2y1wsVbPrgqVSAPbiUiDGJXldOcIsOg0",
-        },
-    },
+    .dependencies = .{},
     .paths = .{
         "build.zig",
         "build.zig.zon",
