@@ -27,5 +27,5 @@ pub fn main() !void {
     defer srv.deinit();
 
     const now = try std.time.Instant.now();
-    try srv.update(now);
+    srv.update(now);
 }

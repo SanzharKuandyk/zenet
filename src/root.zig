@@ -6,6 +6,9 @@ pub const CHALLENGE_KEY_SIZE = 32;
 /// Both sides must use identical options — the wire format depends on it.
 pub const Options = struct {
     max_clients: usize = 1024,
+    /// Maximum number of clients in the handshake (pending) + recycled slot pool.
+    /// Must be a power of two. Defaults to `max_clients * 2` when null.
+    max_pending_clients: ?usize = null,
     nonce_window: usize = 256,
     outgoing_queue_size: usize = 256,
     events_queue_size: usize = 256,

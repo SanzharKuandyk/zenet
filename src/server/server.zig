@@ -23,6 +23,8 @@ pub fn Server(comptime opts: Options) type {
         }
     }
 
+    const pending_cap = opts.max_pending_clients orelse opts.max_clients * 2;
+
     const Conn = connection_mod.Connection(opts);
     const PendingConn = connection_mod.PendingConnection(opts);
     const Pkt = packet_mod.Packet(opts);
@@ -71,7 +73,8 @@ pub fn Server(comptime opts: Options) type {
         current_time: std.time.Instant,
 
         clients: [opts.max_clients]?Conn,
-        recycled_slots: std.ArrayList(u64), // disconnected slots available for reuse
+        addr_to_slot: std.AutoArrayHashMap(AddressKey, usize),
+        recycled_slots: RingQueue(u64, pending_cap),
         slot_cursor: u64, // high-water mark: next never-used index in clients[]
         pending: std.AutoArrayHashMap(AddressKey, PendingConn),
 
@@ -92,7 +95,8 @@ pub fn Server(comptime opts: Options) type {
                 .start_time = try std.time.Instant.now(),
                 .current_time = try std.time.Instant.now(),
                 .clients = [_]?Conn{null} ** opts.max_clients,
-                .recycled_slots = .empty,
+                .addr_to_slot = std.AutoArrayHashMap(AddressKey, usize).init(allocator),
+                .recycled_slots = .{},
                 .slot_cursor = 0,
                 .pending = std.AutoArrayHashMap(AddressKey, PendingConn).init(allocator),
                 .outgoing = .{},
@@ -101,8 +105,8 @@ pub fn Server(comptime opts: Options) type {
         }
 
         pub fn deinit(self: *Self) void {
+            self.addr_to_slot.deinit();
             self.pending.deinit();
-            self.recycled_slots.deinit(self.allocator);
             self.recent_nonces.deinit();
         }
 
@@ -110,20 +114,17 @@ pub fn Server(comptime opts: Options) type {
             return self.current_time.since(self.start_time);
         }
 
-        pub fn update(self: *Self, now: std.time.Instant) !void {
+        pub fn update(self: *Self, now: std.time.Instant) void {
             self.current_time = now;
+            const t = self.getCurrentTime();
 
-            var to_remove: std.ArrayList(AddressKey) = .empty;
-            defer to_remove.deinit(self.allocator);
-
-            var it = self.pending.iterator();
-            while (it.next()) |entry| {
-                if (self.getCurrentTime() > entry.value_ptr.expires_at) {
-                    try to_remove.append(self.allocator, entry.key_ptr.*);
+            // Expire stale pending connections in-place (iterate backwards for safe swapRemove).
+            var i: usize = self.pending.count();
+            while (i > 0) {
+                i -= 1;
+                if (t > self.pending.values()[i].expires_at) {
+                    self.pending.swapRemoveAt(i);
                 }
-            }
-            for (to_remove.items) |key| {
-                _ = self.pending.swapRemove(key);
             }
         }
 
@@ -162,7 +163,7 @@ pub fn Server(comptime opts: Options) type {
                     if (self.recent_nonces.contains(fields.client_nonce)) return ServerError.InvalidPacket;
                     _ = try self.recent_nonces.insert(fields.client_nonce);
 
-                    const cid: u64 = if (self.recycled_slots.pop()) |slot| slot else blk: {
+                    const cid: u64 = self.recycled_slots.popFront() orelse blk: {
                         if (self.slot_cursor >= opts.max_clients) return ServerError.ServerFull;
                         const s = self.slot_cursor;
                         self.slot_cursor += 1;
@@ -195,7 +196,8 @@ pub fn Server(comptime opts: Options) type {
                     })) return ServerError.IoError;
                 },
                 .ConnectionResponse => |resp| {
-                    const pending = self.pending.get(AddressKey.fromAddress(addr)) orelse return ServerError.UnknownClient;
+                    const key = AddressKey.fromAddress(addr);
+                    const pending = self.pending.get(key) orelse return ServerError.UnknownClient;
 
                     const valid = handshake.verifyChallengeToken(
                         resp.token,
@@ -207,32 +209,36 @@ pub fn Server(comptime opts: Options) type {
                     );
                     if (!valid) return ServerError.InvalidPacket;
 
-                    _ = self.pending.swapRemove(AddressKey.fromAddress(addr));
+                    _ = self.pending.swapRemove(key);
 
-                    self.clients[@intCast(pending.cid)] = Conn{
+                    const slot: usize = @intCast(pending.cid);
+                    self.clients[slot] = Conn{
                         .cid = pending.cid,
                         .addr = addr,
                         .last_recv = self.getCurrentTime(),
                         .last_send = 0,
                         .user_data = pending.user_data,
                     };
+                    try self.addr_to_slot.put(key, slot);
 
                     if (!self.events.pushBack(.{
                         .ClientConnected = .{ .cid = pending.cid, .addr = addr, .user_data = pending.user_data },
                     })) return ServerError.IoError;
                 },
                 .Payload => |payload| {
-                    const i = self.findClientByAddr(addr) orelse return ServerError.UnknownClient;
-                    const conn = self.clients[i].?;
+                    const slot = self.addr_to_slot.get(AddressKey.fromAddress(addr)) orelse return ServerError.UnknownClient;
+                    const conn = self.clients[slot].?;
                     if (!self.events.pushBack(.{
                         .PayloadReceived = .{ .cid = conn.cid, .addr = conn.addr, .payload = payload },
                     })) return ServerError.IoError;
                 },
                 .Disconnect => {
-                    const i = self.findClientByAddr(addr) orelse return ServerError.UnknownClient;
-                    const conn = self.clients[i].?;
-                    self.clients[i] = null;
-                    try self.recycled_slots.append(self.allocator, i);
+                    const key = AddressKey.fromAddress(addr);
+                    const slot = self.addr_to_slot.get(key) orelse return ServerError.UnknownClient;
+                    const conn = self.clients[slot].?;
+                    self.clients[slot] = null;
+                    _ = self.addr_to_slot.swapRemove(key);
+                    _ = self.recycled_slots.pushBack(conn.cid);
                     if (!self.events.pushBack(.{
                         .ClientDisconnected = .{ .cid = conn.cid, .addr = addr },
                     })) return ServerError.IoError;
@@ -240,15 +246,6 @@ pub fn Server(comptime opts: Options) type {
 
                 .Challenge => return ServerError.InvalidPacket,
             }
-        }
-
-        fn findClientByAddr(self: *const Self, addr: std.net.Address) ?usize {
-            const key = AddressKey.fromAddress(addr);
-            for (self.clients, 0..) |maybe_conn, i| {
-                const conn = maybe_conn orelse continue;
-                if (AddressKey.eql(AddressKey.fromAddress(conn.addr), key)) return i;
-            }
-            return null;
         }
     };
 }

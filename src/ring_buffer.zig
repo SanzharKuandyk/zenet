@@ -1,4 +1,10 @@
 pub fn RingQueue(comptime T: type, comptime N: usize) type {
+    comptime {
+        if (N == 0 or (N & (N - 1)) != 0)
+            @compileError("RingQueue capacity must be a power of two");
+    }
+    const mask = N - 1;
+
     return struct {
         const Self = @This();
 
@@ -19,7 +25,7 @@ pub fn RingQueue(comptime T: type, comptime N: usize) type {
             if (self.len == N) return false;
 
             self.buf[self.tail] = value;
-            self.tail = (self.tail + 1) % N;
+            self.tail = (self.tail + 1) & mask;
             self.len += 1;
             return true;
         }
@@ -28,7 +34,7 @@ pub fn RingQueue(comptime T: type, comptime N: usize) type {
             if (self.len == 0) return null;
 
             const value = self.buf[self.head];
-            self.head = (self.head + 1) % N;
+            self.head = (self.head + 1) & mask;
             self.len -= 1;
             return value;
         }
