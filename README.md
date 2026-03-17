@@ -158,13 +158,14 @@ try cli.sendOnChannel(1, &std.mem.toBytes(player_position));
 try cli.sendOnChannel(2, "must arrive");
 
 // receive on server
-while (srv.pollMessage()) |msg| {
+while (srv.peekMessage()) |msg| {
     switch (msg.channel_id) {
         0 => ..., // Unreliable
         1 => ..., // UnreliableLatest — older packets already dropped
         2 => ..., // Reliable
         else => {},
     }
+    srv.consumeMessage();
 }
 ```
 

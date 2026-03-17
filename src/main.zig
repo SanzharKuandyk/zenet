@@ -36,7 +36,8 @@ pub fn main() !void {
         }
     }
 
-    while (srv.pollMessage()) |msg| {
+    while (srv.peekMessage()) |msg| {
         std.debug.print("msg from {} on ch{}: {} bytes\n", .{ msg.cid, msg.channel_id, msg.len });
+        srv.consumeMessage();
     }
 }
