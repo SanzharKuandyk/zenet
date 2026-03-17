@@ -3,9 +3,9 @@ const root = @import("../root.zig");
 const packet_mod = @import("../packet.zig");
 const handshake = @import("../handshake.zig");
 const Options = root.Options;
-const RingQueue = @import("../ring_buffer.zig").RingQueue;
 const ClientError = @import("error.zig").ClientError;
 const ClientConfig = @import("config.zig").ClientConfig;
+const RingQueue = @import("../ring_buffer.zig").RingQueue;
 
 pub fn Client(comptime opts: Options) type {
     const Pkt = packet_mod.Packet(opts);

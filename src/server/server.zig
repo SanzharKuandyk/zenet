@@ -128,6 +128,17 @@ pub fn Server(comptime opts: Options) type {
             }
         }
 
+        /// Send a payload packet to a connected client.
+        pub fn sendPayload(self: *Self, cid: u64, body: [opts.max_payload_size]u8) ServerError!void {
+            const slot: usize = @intCast(cid);
+            const conn = &(self.clients[slot] orelse return ServerError.UnknownClient);
+            conn.send_seq += 1;
+            if (!self.outgoing.pushBack(.{
+                .addr = conn.addr,
+                .packet = .{ .Payload = .{ .sequence = conn.send_seq, .body = body } },
+            })) return ServerError.IoError;
+        }
+
         pub fn pollEvent(self: *Self) ?Event {
             return self.events.popFront();
         }
@@ -218,6 +229,7 @@ pub fn Server(comptime opts: Options) type {
                         .last_recv = self.getCurrentTime(),
                         .last_send = 0,
                         .last_recv_seq = 0,
+                        .send_seq = 0,
                         .user_data = pending.user_data,
                     };
                     try self.addr_to_slot.put(key, slot);

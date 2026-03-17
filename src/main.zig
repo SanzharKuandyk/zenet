@@ -33,7 +33,10 @@ pub fn main() !void {
         switch (event) {
             .ClientConnected => |e| std.debug.print("connected: {}\n", .{e.cid}),
             .ClientDisconnected => |e| std.debug.print("disconnected: {}\n", .{e.cid}),
-            .PayloadReceived => |e| std.debug.print("payload from: {}\n", .{e.cid}),
         }
+    }
+
+    while (srv.pollMessage()) |msg| {
+        std.debug.print("msg from {} on ch{}: {} bytes\n", .{ msg.cid, msg.channel_id, msg.len });
     }
 }
