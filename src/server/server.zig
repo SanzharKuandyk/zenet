@@ -217,6 +217,7 @@ pub fn Server(comptime opts: Options) type {
                         .addr = addr,
                         .last_recv = self.getCurrentTime(),
                         .last_send = 0,
+                        .last_recv_seq = 0,
                         .user_data = pending.user_data,
                     };
                     try self.addr_to_slot.put(key, slot);
@@ -227,7 +228,9 @@ pub fn Server(comptime opts: Options) type {
                 },
                 .Payload => |payload| {
                     const slot = self.addr_to_slot.get(AddressKey.fromAddress(addr)) orelse return ServerError.UnknownClient;
-                    const conn = self.clients[slot].?;
+                    const conn = &self.clients[slot].?;
+                    if (payload.sequence <= conn.last_recv_seq) return ServerError.InvalidPacket;
+                    conn.last_recv_seq = payload.sequence;
                     if (!self.events.pushBack(.{
                         .PayloadReceived = .{ .cid = conn.cid, .addr = conn.addr, .payload = payload },
                     })) return ServerError.IoError;

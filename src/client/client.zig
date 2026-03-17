@@ -36,6 +36,7 @@ pub fn Client(comptime opts: Options) type {
         config: ClientConfig,
 
         client_nonce: u64,
+        send_seq: u64,
         connect_sent_at: u64,
         last_recv: u64,
 
@@ -51,6 +52,7 @@ pub fn Client(comptime opts: Options) type {
                 .state = .Disconnected,
                 .config = config,
                 .client_nonce = 0,
+                .send_seq = 0,
                 .connect_sent_at = 0,
                 .last_recv = 0,
                 .start_time = now,
@@ -154,9 +156,10 @@ pub fn Client(comptime opts: Options) type {
         /// Queue a payload to send to the server.
         pub fn sendPayload(self: *Self, body: [opts.max_payload_size]u8) ClientError!void {
             if (self.state != .Connected) return ClientError.InvalidState;
+            self.send_seq += 1;
             if (!self.outgoing.pushBack(.{
                 .addr = self.config.server_addr,
-                .packet = .{ .Payload = .{ .body = body } },
+                .packet = .{ .Payload = .{ .sequence = self.send_seq, .body = body } },
             })) return ClientError.IoError;
         }
 

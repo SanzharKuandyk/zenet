@@ -63,6 +63,7 @@ pub const ConnectionResponse = struct {
 
 pub fn Payload(comptime opts: Options) type {
     return struct {
+        sequence: u64,
         body: [opts.max_payload_size]u8,
     };
 }

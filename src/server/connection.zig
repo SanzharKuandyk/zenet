@@ -7,6 +7,7 @@ pub fn Connection(comptime opts: Options) type {
         addr: std.net.Address,
         last_recv: u64,
         last_send: u64,
+        last_recv_seq: u64,
         user_data: ?[opts.user_data_size]u8,
     };
 }
