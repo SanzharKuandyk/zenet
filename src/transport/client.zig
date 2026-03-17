@@ -319,6 +319,17 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
             return self.messages.popFront();
         }
 
+        /// Return a pointer to the front message without removing it.
+        /// The pointer is valid until the next call to `consumeMessage` or `pollMessage`.
+        pub fn peekMessage(self: *const Self) ?*const Message {
+            return self.messages.peekFront();
+        }
+
+        /// Discard the front message (pair with `peekMessage` for zero-copy reads).
+        pub fn consumeMessage(self: *Self) void {
+            self.messages.advance();
+        }
+
         /// Direct access to the underlying state machine for advanced usage.
         pub fn getStateMachine(self: *Self) *Cli {
             return &self.cli;

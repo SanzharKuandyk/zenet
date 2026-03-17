@@ -60,10 +60,12 @@ while (running) {
         .ClientDisconnected => |e| std.debug.print("disconnected cid={}\n", .{e.cid}),
     };
 
-    while (srv.pollMessage()) |msg| {
+    // zero-copy: pointer into the ring buffer — no data[] copy
+    while (srv.peekMessage()) |msg| {
         std.debug.print("ch={} data={s}\n", .{ msg.channel_id, msg.data[0..msg.len] });
         // echo back
         try srv.sendOnChannel(msg.cid, msg.channel_id, msg.data[0..msg.len]);
+        srv.consumeMessage();
     }
 }
 
@@ -87,9 +89,11 @@ while (running) {
         .Disconnected => std.debug.print("disconnected\n", .{}),
     };
 
-    while (cli.pollMessage()) |msg| {
+    // zero-copy: pointer into the ring buffer — no data[] copy
+    while (cli.peekMessage()) |msg| {
         std.debug.print("from server ch={} data={s}\n",
             .{ msg.channel_id, msg.data[0..msg.len] });
+        cli.consumeMessage();
     }
 
     // send on channel 2 (Reliable)
@@ -201,13 +205,19 @@ while (srv.pollEvent()) |ev| {
     }
 }
 
-// incoming messages
-while (srv.pollMessage()) |msg| {
+// incoming messages — zero-copy (preferred for large payloads)
+while (srv.peekMessage()) |msg| {
+    // msg : *const Message — points into ring buffer, no copy of data[]
     // msg.cid        : u64
     // msg.channel_id : u8
     // msg.data       : [max_message_size]u8   (first msg.len bytes are valid)
     // msg.len        : usize
     _ = msg.data[0..msg.len];
+    srv.consumeMessage(); // advance the ring buffer
+}
+// or copy-out variant (simpler, fine for small payloads)
+while (srv.pollMessage()) |msg| {
+    _ = msg.data[0..msg.len]; // msg is a value copy
 }
 
 // outgoing
@@ -238,8 +248,15 @@ while (cli.pollEvent()) |ev| {
     }
 }
 
+// zero-copy (preferred for large payloads)
+while (cli.peekMessage()) |msg| {
+    // msg : *const Message — points into ring buffer, no copy of data[]
+    _ = msg.data[0..msg.len];
+    cli.consumeMessage();
+}
+// or copy-out variant
 while (cli.pollMessage()) |msg| {
-    // msg.channel_id, msg.data, msg.len
+    _ = msg.data[0..msg.len];
 }
 
 try cli.sendOnChannel(channel_id, data_slice);

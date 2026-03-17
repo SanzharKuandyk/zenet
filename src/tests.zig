@@ -9,9 +9,10 @@ const LoopbackSocket = @import("transport/loopback.zig").LoopbackSocket;
 const TransportServer = @import("transport/server.zig").TransportServer;
 const TransportClient = @import("transport/client.zig").TransportClient;
 
-// Re-export channel unit tests so `zig build test` picks them up.
+// Re-export unit tests from sub-modules so `zig build test` picks them up.
 comptime {
     _ = channel_mod;
+    _ = @import("ring_buffer.zig");
 }
 
 const opts: zenet.Options = .{
@@ -419,6 +420,39 @@ test "transport loopback: client sendOnChannel reaches server" {
     try testing.expectEqualStrings("hello reliable", msg.?.data[0.."hello reliable".len]);
 
     std.debug.print("\n  PASS: transport loopback: client sendOnChannel reaches server\n", .{});
+}
+
+test "transport loopback: peekMessage/consumeMessage zero-copy" {
+    var pair: LoopbackSocket.Pair = .{};
+
+    var srv = try TSrv.initWithSocket(testing.allocator, transportServerCfg(), pair.serverSocket(srv_addr));
+    defer srv.deinit();
+
+    var cli = try TCli.initWithSocket(loopbackClientCfg(), pair.clientSocket(cli_addr));
+    defer cli.deinit();
+
+    try cli.connect();
+    const evs = try handshake(&srv, &cli, 20);
+    const cid = evs[0].ClientConnected.cid;
+
+    try srv.sendOnChannel(cid, 0, "peek-test");
+    srv.tick();
+    cli.tick();
+
+    // peek does not consume
+    const p1 = cli.peekMessage();
+    try testing.expect(p1 != null);
+    try testing.expectEqualStrings("peek-test", p1.?.data[0.."peek-test".len]);
+
+    const p2 = cli.peekMessage();
+    try testing.expect(p2 != null); // still there
+    try testing.expectEqual(p1.?, p2.?); // same pointer
+
+    // consume removes it
+    cli.consumeMessage();
+    try testing.expect(cli.peekMessage() == null);
+
+    std.debug.print("\n  PASS: transport loopback: peekMessage/consumeMessage zero-copy\n", .{});
 }
 
 test "transport loopback: client disconnect" {
