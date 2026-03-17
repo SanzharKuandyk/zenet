@@ -532,4 +532,4 @@ src/
 
 ## License
 
-TBD
+MIT
