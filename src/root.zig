@@ -1,3 +1,5 @@
+const std = @import("std");
+
 pub const SECRET_KEY_SIZE = 32;
 pub const CHALLENGE_KEY_SIZE = 32;
 
@@ -24,8 +26,8 @@ pub const Options = struct {
     channels: []const ChannelKind = &.{.Unreliable},
     /// How many unACKed messages each reliable channel can buffer per peer.
     reliable_buffer: usize = 64,
-    /// Milliseconds before an unACKed reliable message is resent.
-    reliable_resend_ms: u64 = 100,
+    /// Nanoseconds before an unACKed reliable message is resent.
+    reliable_resend_ns: u64 = 100 * std.time.ns_per_ms,
     /// Capacity of the incoming message queue in TransportServer/TransportClient.
     /// Sized separately from events_queue_size because messages arrive far more often.
     messages_queue_size: usize = 256,

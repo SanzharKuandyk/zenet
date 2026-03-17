@@ -107,7 +107,7 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
         ///   6. Retransmit any reliable messages that have not been ACKed in time.
         pub fn tick(self: *Self) void {
             const now = std.time.Instant.now() catch return;
-            const now_ms = self.cli.getCurrentTime(); // ms since client started, for timers
+            const now_ms = self.cli.getCurrentTime(); // ns since client started, for timers
             self.cli.update(now); // advance clock; may emit Disconnected on timeout
 
             // Step 2: send anything already sitting in the outgoing queue.
@@ -204,7 +204,7 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
         }
 
         /// Walk every reliable channel's send buffer and resend any entry whose
-        /// ACK has not arrived within `opts.reliable_resend_ms` milliseconds.
+        /// ACK has not arrived within `opts.reliable_resend_ns` milliseconds.
         ///
         /// Called once per tick, after all incoming packets have been processed,
         /// so any ACKs that arrived this tick have already been applied and won't
@@ -225,7 +225,7 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
                     // Not enough time has passed since the last send attempt.
                     // `-|` is saturating subtraction: protects against now_ms < e.sent_at
                     // which could happen if the clock is read before update() in edge cases.
-                    if (now_ms -| e.sent_at < opts.reliable_resend_ms) continue;
+                    if (now_ms -| e.sent_at < opts.reliable_resend_ns) continue;
 
                     // Rebuild the full payload body: channel header followed by the
                     // original user data that was stored when the message was first sent.

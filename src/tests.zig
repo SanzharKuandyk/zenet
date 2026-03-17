@@ -24,7 +24,7 @@ const opts: zenet.Options = .{
     .max_payload_size = 64,
     .channels = &.{ .Unreliable, .UnreliableLatest, .Reliable },
     .reliable_buffer = 8,
-    .reliable_resend_ms = 100,
+    .reliable_resend_ns = 100 * std.time.ns_per_ms,
 };
 
 const Srv = zenet.Server(opts);
@@ -303,10 +303,7 @@ const TCli = TransportClient(opts, LoopbackSocket);
 const srv_addr = std.net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, 20000);
 const cli_addr = std.net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, 20001);
 
-/// Server config suitable for transport-layer tests that run tick() with real
-/// time.  getCurrentTime() returns nanoseconds (via Instant.since), so the
-/// _ms-named fields must hold nanosecond values large enough to survive the
-/// delay between tick() calls (typically tens to hundreds of microseconds).
+/// Server config suitable for transport-layer tests that run tick() with real time.
 fn transportServerCfg() zenet.ServerConfig {
     const ns_per_s = std.time.ns_per_s;
     return zenet.ServerConfig.init(1, 5 * ns_per_s, 30 * ns_per_s, &.{}, false, [_]u8{0} ** 32, null);
@@ -317,8 +314,8 @@ fn loopbackClientCfg() zenet.ClientConfig {
     return .{
         .protocol_id = 1,
         .server_addr = srv_addr,
-        .connect_timeout_ms = 5 * ns_per_s,
-        .timeout_ms = 30 * ns_per_s,
+        .connect_timeout_ns = 5 * ns_per_s,
+        .timeout_ns = 30 * ns_per_s,
     };
 }
 

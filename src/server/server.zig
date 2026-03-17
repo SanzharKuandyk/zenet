@@ -178,7 +178,7 @@ pub fn Server(comptime opts: Options) type {
                     };
 
                     self.challenge_seq += 1;
-                    const expires_at = self.getCurrentTime() + self.config.handshake_alive_ms;
+                    const expires_at = self.getCurrentTime() + self.config.handshake_alive_ns;
                     const token = handshake.generateChallengeToken(
                         &self.challenge_key,
                         cid,

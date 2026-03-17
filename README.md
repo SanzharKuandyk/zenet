@@ -42,8 +42,8 @@ const Srv = zenet.TransportServer(opts, void); // void = built-in UDP
 
 var srv = try Srv.init(allocator, zenet.ServerConfig.init(
     1,                          // protocol_id
-    5  * std.time.ns_per_s,     // handshake timeout (nanoseconds)
-    30 * std.time.ns_per_s,     // client timeout    (nanoseconds)
+    5  * std.time.ns_per_s,     // handshake_alive_ns
+    30 * std.time.ns_per_s,     // client_timeout_ns
     &.{},                       // public addresses (secure mode only)
     false,                      // secure
     [_]u8{0} ** 32,             // challenge key
@@ -97,11 +97,6 @@ while (running) {
 }
 ```
 
-> **Timing note** — `ServerConfig` and `ClientConfig` timeout fields have `_ms`
-> in their names but the values are compared against `std.time.Instant.since()`
-> which returns **nanoseconds**. Use `N * std.time.ns_per_ms` or
-> `N * std.time.ns_per_s` accordingly.
-
 ---
 
 ## Options
@@ -123,7 +118,7 @@ const opts: zenet.Options = .{
 
     // Reliable channel tuning
     .reliable_buffer      = 64,    // unACKed send slots per channel per peer
-    .reliable_resend_ms   = 100 * std.time.ns_per_ms,  // retransmit interval (ns)
+    .reliable_resend_ns   = 100 * std.time.ns_per_ms,  // retransmit interval
 
     // Queue sizes
     .outgoing_queue_size  = 256,
@@ -257,7 +252,7 @@ cli.disconnect(); // graceful
 ```zig
 const cfg = zenet.ServerConfig.init(
     protocol_id,          // u64  — must match client
-    handshake_timeout_ns, // u64  — ns; pending handshake lifetime
+    handshake_alive_ns,   // u64  — ns; pending handshake lifetime
     client_timeout_ns,    // u64  — ns; idle disconnect threshold
     public_addresses,     // []const std.net.Address  (secure mode)
     secure,               // bool — require signed ConnectToken
@@ -272,8 +267,8 @@ const cfg = zenet.ServerConfig.init(
 const cfg: zenet.ClientConfig = .{
     .protocol_id        = 1,
     .server_addr        = server_address,
-    .connect_timeout_ms = 5  * std.time.ns_per_s,  // ns
-    .timeout_ms         = 30 * std.time.ns_per_s,  // ns
+    .connect_timeout_ns = 5  * std.time.ns_per_s,  // ns
+    .timeout_ns         = 30 * std.time.ns_per_s,
 };
 ```
 

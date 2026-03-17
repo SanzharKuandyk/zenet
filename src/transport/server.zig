@@ -196,7 +196,7 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
                     const rel = &self.channel_state[slot][ch_idx].rel;
                     for (&rel.entries) |*e| {
                         if (!e.active) continue;
-                        if (now_ms -| e.sent_at < opts.reliable_resend_ms) continue;
+                        if (now_ms -| e.sent_at < opts.reliable_resend_ns) continue;
                         var body: [opts.max_payload_size]u8 = [_]u8{0} ** opts.max_payload_size;
                         channel_mod.encodeHeader(body[0..channel_mod.HEADER_SIZE], @intCast(ch_idx), e.seq);
                         @memcpy(body[channel_mod.HEADER_SIZE .. channel_mod.HEADER_SIZE + e.len], e.data[0..e.len]);

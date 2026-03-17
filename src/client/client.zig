@@ -72,13 +72,13 @@ pub fn Client(comptime opts: Options) type {
             const t = self.getCurrentTime();
             switch (self.state) {
                 .Connecting => {
-                    if (t -| self.connect_sent_at > self.config.connect_timeout_ms) {
+                    if (t -| self.connect_sent_at > self.config.connect_timeout_ns) {
                         self.state = .Disconnected;
                         _ = self.events.pushBack(.Disconnected);
                     }
                 },
                 .Connected => {
-                    if (t -| self.last_recv > self.config.timeout_ms) {
+                    if (t -| self.last_recv > self.config.timeout_ns) {
                         self.state = .Disconnected;
                         _ = self.events.pushBack(.Disconnected);
                     }
