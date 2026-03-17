@@ -9,17 +9,15 @@ const RingQueue = @import("../ring_buffer.zig").RingQueue;
 
 pub fn Client(comptime opts: Options) type {
     const Pkt = packet_mod.Packet(opts);
-    const pkt_size = @sizeOf(Pkt);
-
     const ConnectTokenType = if (opts.ConnectToken == void)
-        handshake.DefaultConnectToken(opts.user_data_size)
+        handshake.DefaultConnectToken(opts.user_data_size, opts.max_token_addresses)
     else
         opts.ConnectToken;
 
     return struct {
         const Self = @This();
 
-        pub const State = enum { Disconnected, Connecting, Connected };
+        pub const State = enum { Disconnected, SendingRequest, SendingResponse, Connected };
 
         pub const Event = union(enum) {
             Connected,
@@ -36,8 +34,11 @@ pub fn Client(comptime opts: Options) type {
         config: ClientConfig,
 
         client_nonce: u64,
-        send_seq: u64,
-        connect_sent_at: u64,
+        secure_token: ?ConnectTokenType,
+        pending_response: ?packet_mod.ConnectionResponse,
+        connect_started_at: u64,
+        last_handshake_send: u64,
+        has_handshake_send: bool,
         last_recv: u64,
 
         start_time: std.time.Instant,
@@ -52,8 +53,11 @@ pub fn Client(comptime opts: Options) type {
                 .state = .Disconnected,
                 .config = config,
                 .client_nonce = 0,
-                .send_seq = 0,
-                .connect_sent_at = 0,
+                .secure_token = null,
+                .pending_response = null,
+                .connect_started_at = 0,
+                .last_handshake_send = 0,
+                .has_handshake_send = false,
                 .last_recv = 0,
                 .start_time = now,
                 .current_time = now,
@@ -66,20 +70,15 @@ pub fn Client(comptime opts: Options) type {
             return self.current_time.since(self.start_time);
         }
 
-        /// Advance the client clock and expire stale states.
         pub fn update(self: *Self, now: std.time.Instant) void {
             self.current_time = now;
             const t = self.getCurrentTime();
             switch (self.state) {
-                .Connecting => {
-                    if (t -| self.connect_sent_at > self.config.connect_timeout_ns) {
-                        self.state = .Disconnected;
-                        _ = self.events.pushBack(.Disconnected);
-                    }
-                },
+                .SendingRequest, .SendingResponse => self.updateHandshake(t),
                 .Connected => {
                     if (t -| self.last_recv > self.config.timeout_ns) {
                         self.state = .Disconnected;
+                        self.clearHandshakeState();
                         _ = self.events.pushBack(.Disconnected);
                     }
                 },
@@ -87,86 +86,95 @@ pub fn Client(comptime opts: Options) type {
             }
         }
 
-        /// Send a plain (unauthenticated) connection request.
         pub fn connect(self: *Self) ClientError!void {
-            if (self.state != .Disconnected) return ClientError.InvalidState;
+            if (self.state != .Disconnected) return error.InvalidState;
             self.client_nonce = std.crypto.random.int(u64);
-            self.connect_sent_at = self.getCurrentTime();
-            self.state = .Connecting;
-            if (!self.outgoing.pushBack(.{
-                .addr = self.config.server_addr,
-                .packet = .{ .ConnectionRequest = .{ .Plain = .{
-                    .protocol_id = @truncate(self.config.protocol_id),
-                    .client_nonce = self.client_nonce,
-                } } },
-            })) return ClientError.IoError;
+            self.secure_token = null;
+            self.pending_response = null;
+            self.connect_started_at = self.getCurrentTime();
+            self.last_handshake_send = 0;
+            self.state = .SendingRequest;
+            self.queueConnectionRequest() catch |err| {
+                self.state = .Disconnected;
+                self.clearHandshakeState();
+                return err;
+            };
         }
 
-        /// Send a secure connection request using a connect token.
         pub fn connectSecure(self: *Self, token: ConnectTokenType) ClientError!void {
-            if (self.state != .Disconnected) return ClientError.InvalidState;
+            if (self.state != .Disconnected) return error.InvalidState;
             self.client_nonce = std.crypto.random.int(u64);
-            self.connect_sent_at = self.getCurrentTime();
-            self.state = .Connecting;
-            if (!self.outgoing.pushBack(.{
-                .addr = self.config.server_addr,
-                .packet = .{ .ConnectionRequest = .{ .Secure = .{
-                    .protocol_id = @truncate(self.config.protocol_id),
-                    .client_nonce = self.client_nonce,
-                    .token = token,
-                } } },
-            })) return ClientError.IoError;
+            self.secure_token = token;
+            self.pending_response = null;
+            self.connect_started_at = self.getCurrentTime();
+            self.last_handshake_send = 0;
+            self.state = .SendingRequest;
+            self.queueConnectionRequest() catch |err| {
+                self.state = .Disconnected;
+                self.clearHandshakeState();
+                return err;
+            };
         }
 
-        /// Process a raw packet received from the server.
         pub fn handlePacket(self: *Self, buffer: []const u8) ClientError!void {
-            if (buffer.len < pkt_size) return ClientError.InvalidPacket;
-            const pkt = packet_mod.deserialize(opts, buffer[0..pkt_size].*);
+            const pkt = packet_mod.deserialize(opts, buffer) catch return error.InvalidPacket;
 
             switch (pkt) {
                 .Challenge => |challenge| {
-                    if (self.state != .Connecting) return ClientError.InvalidPacket;
-                    // Echo the challenge back immediately.
-                    if (!self.outgoing.pushBack(.{
-                        .addr = self.config.server_addr,
-                        .packet = .{ .ConnectionResponse = .{
-                            .sequence = challenge.sequence,
-                            .token = challenge.token,
-                        } },
-                    })) return ClientError.IoError;
+                    switch (self.state) {
+                        .SendingRequest, .SendingResponse => {},
+                        else => return error.InvalidPacket,
+                    }
+                    self.pending_response = .{
+                        .sequence = challenge.sequence,
+                        .token = challenge.token,
+                    };
+                    self.state = .SendingResponse;
+                    try self.queueConnectionResponse();
                     self.last_recv = self.getCurrentTime();
+                },
+                .ConnectionAccepted => {
+                    if (self.state != .SendingResponse) return error.InvalidPacket;
                     self.state = .Connected;
+                    self.clearHandshakeState();
+                    self.last_recv = self.getCurrentTime();
                     _ = self.events.pushBack(.Connected);
                 },
                 .Payload => |payload| {
-                    if (self.state != .Connected) return ClientError.InvalidPacket;
+                    if (self.state != .Connected) return error.InvalidPacket;
                     self.last_recv = self.getCurrentTime();
                     _ = self.events.pushBack(.{ .PayloadReceived = payload });
                 },
                 .Disconnect => {
-                    if (self.state != .Connected) return ClientError.InvalidPacket;
+                    if (self.state != .Connected) return error.InvalidPacket;
                     self.state = .Disconnected;
+                    self.clearHandshakeState();
                     _ = self.events.pushBack(.Disconnected);
                 },
-                // Server-to-server or wrong-direction packets.
-                .ConnectionRequest, .ConnectionResponse => return ClientError.InvalidPacket,
+                .ConnectionRequest, .ConnectionResponse => return error.InvalidPacket,
             }
         }
 
-        /// Queue a payload to send to the server.
-        pub fn sendPayload(self: *Self, body: [opts.max_payload_size]u8) ClientError!void {
-            if (self.state != .Connected) return ClientError.InvalidState;
-            self.send_seq += 1;
+        pub fn sendPayload(self: *Self, body: []const u8) ClientError!void {
+            if (self.state != .Connected) return error.InvalidState;
+            if (body.len > opts.max_payload_size) return error.PayloadTooLarge;
+
+            var payload: packet_mod.Payload(opts) = .{
+                .len = @intCast(body.len),
+                .body = [_]u8{0} ** opts.max_payload_size,
+            };
+            @memcpy(payload.body[0..body.len], body);
+
             if (!self.outgoing.pushBack(.{
                 .addr = self.config.server_addr,
-                .packet = .{ .Payload = .{ .sequence = self.send_seq, .body = body } },
-            })) return ClientError.IoError;
+                .packet = .{ .Payload = payload },
+            })) return error.IoError;
         }
 
-        /// Gracefully disconnect. Queues a Disconnect packet and transitions immediately.
         pub fn disconnect(self: *Self) void {
             if (self.state != .Connected) return;
             self.state = .Disconnected;
+            self.clearHandshakeState();
             _ = self.outgoing.pushBack(.{
                 .addr = self.config.server_addr,
                 .packet = .Disconnect,
@@ -179,6 +187,64 @@ pub fn Client(comptime opts: Options) type {
 
         pub fn pollOutgoing(self: *Self) ?Outgoing {
             return self.outgoing.popFront();
+        }
+
+        fn updateHandshake(self: *Self, now: u64) void {
+            if (now -| self.connect_started_at > self.config.connect_timeout_ns) {
+                self.state = .Disconnected;
+                self.clearHandshakeState();
+                _ = self.events.pushBack(.Disconnected);
+                return;
+            }
+            if (self.has_handshake_send and now -| self.last_handshake_send < self.config.connect_retry_ns)
+                return;
+
+            switch (self.state) {
+                .SendingRequest => self.queueConnectionRequest() catch {},
+                .SendingResponse => self.queueConnectionResponse() catch {},
+                else => {},
+            }
+        }
+
+        fn queueConnectionRequest(self: *Self) ClientError!void {
+            const req: packet_mod.ConnectionRequest(opts) = if (self.secure_token) |token|
+                .{ .Secure = .{
+                    .protocol_id = self.config.protocol_id,
+                    .client_nonce = self.client_nonce,
+                    .token = token,
+                } }
+            else
+                .{ .Plain = .{
+                    .protocol_id = self.config.protocol_id,
+                    .client_nonce = self.client_nonce,
+                } };
+
+            if (!self.outgoing.pushBack(.{
+                .addr = self.config.server_addr,
+                .packet = .{ .ConnectionRequest = req },
+            })) return error.IoError;
+
+            self.last_handshake_send = self.getCurrentTime();
+            self.has_handshake_send = true;
+        }
+
+        fn queueConnectionResponse(self: *Self) ClientError!void {
+            const response = self.pending_response orelse return error.InvalidState;
+            if (!self.outgoing.pushBack(.{
+                .addr = self.config.server_addr,
+                .packet = .{ .ConnectionResponse = response },
+            })) return error.IoError;
+
+            self.last_handshake_send = self.getCurrentTime();
+            self.has_handshake_send = true;
+        }
+
+        fn clearHandshakeState(self: *Self) void {
+            self.secure_token = null;
+            self.pending_response = null;
+            self.connect_started_at = 0;
+            self.last_handshake_send = 0;
+            self.has_handshake_send = false;
         }
     };
 }

@@ -47,16 +47,18 @@ fn clientCfg(port: u16) zenet.ClientConfig {
 /// Relay all outgoing packets from `src` to `dst.handlePacket`.
 /// `src_addr` is the address dst will see as the sender.
 fn relayClientToServer(cli: *Cli, srv: *Srv, client_addr: std.net.Address) !void {
+    var buf: [packet_mod.maxPacketSize(opts)]u8 = undefined;
     while (cli.pollOutgoing()) |out| {
-        const bytes = packet_mod.serialize(opts, out.packet);
-        try srv.handlePacket(client_addr, &bytes);
+        const len = try packet_mod.serialize(opts, out.packet, buf[0..]);
+        try srv.handlePacket(client_addr, buf[0..len]);
     }
 }
 
 fn relayServerToClient(srv: *Srv, cli: *Cli) !void {
+    var buf: [packet_mod.maxPacketSize(opts)]u8 = undefined;
     while (srv.pollOutgoing()) |out| {
-        const bytes = packet_mod.serialize(opts, out.packet);
-        try cli.handlePacket(&bytes);
+        const len = try packet_mod.serialize(opts, out.packet, buf[0..]);
+        try cli.handlePacket(buf[0..len]);
     }
 }
 
@@ -81,9 +83,11 @@ test "server-client plain connect handshake" {
 
     // Step 2: server sends Challenge
     try relayServerToClient(&srv, &cli);
+    try testing.expect(cli.pollEvent() == null);
 
-    // Step 3: client sends ConnectionResponse; server should emit ClientConnected
+    // Step 3: client sends ConnectionResponse; server accepts and replies
     try relayClientToServer(&cli, &srv, client_addr);
+    try relayServerToClient(&srv, &cli);
 
     // Client should be Connected
     const cli_ev = cli.pollEvent().?;
@@ -91,7 +95,6 @@ test "server-client plain connect handshake" {
     try testing.expect(cli.pollEvent() == null);
 
     // Server should have ClientConnected
-    try relayServerToClient(&srv, &cli); // flush any server outgoing
     const srv_ev = srv.pollEvent().?;
     try testing.expect(srv_ev == .ClientConnected);
     try testing.expectEqual(@as(u64, 0), srv_ev.ClientConnected.cid);
@@ -114,6 +117,7 @@ test "server disconnects client on Disconnect packet" {
     try relayClientToServer(&cli, &srv, client_addr);
     try relayServerToClient(&srv, &cli);
     try relayClientToServer(&cli, &srv, client_addr);
+    try relayServerToClient(&srv, &cli);
     _ = cli.pollEvent(); // Connected
     _ = srv.pollEvent(); // ClientConnected
 
@@ -145,17 +149,19 @@ test "server sendPayload reaches client as PayloadReceived" {
     try relayClientToServer(&cli, &srv, client_addr);
     try relayServerToClient(&srv, &cli);
     try relayClientToServer(&cli, &srv, client_addr);
+    try relayServerToClient(&srv, &cli);
     _ = cli.pollEvent(); // Connected
     const srv_ev = srv.pollEvent().?; // ClientConnected
     const cid = srv_ev.ClientConnected.cid;
 
     // Server sends a payload
-    const body: [opts.max_payload_size]u8 = [_]u8{0xAB} ** opts.max_payload_size;
-    try srv.sendPayload(cid, body);
+    const body = [_]u8{ 0xAB, 0xBC, 0xCD };
+    try srv.sendPayload(cid, &body);
     try relayServerToClient(&srv, &cli);
 
     const cli_ev = cli.pollEvent().?;
     try testing.expect(cli_ev == .PayloadReceived);
+    try testing.expectEqual(@as(u16, body.len), cli_ev.PayloadReceived.len);
     try testing.expectEqual(@as(u8, 0xAB), cli_ev.PayloadReceived.body[0]);
 
     std.debug.print("\n  PASS: server sendPayload reaches client as PayloadReceived\n", .{});
@@ -179,15 +185,17 @@ test "client sendPayload reaches server as PayloadReceived" {
     try relayClientToServer(&cli, &srv, client_addr);
     try relayServerToClient(&srv, &cli);
     try relayClientToServer(&cli, &srv, client_addr);
+    try relayServerToClient(&srv, &cli);
     _ = cli.pollEvent();
     _ = srv.pollEvent();
 
-    const body: [opts.max_payload_size]u8 = [_]u8{0xCD} ** opts.max_payload_size;
-    try cli.sendPayload(body);
+    const body = [_]u8{ 0xCD, 0xEE };
+    try cli.sendPayload(&body);
     try relayClientToServer(&cli, &srv, client_addr);
 
     const ev = srv.pollEvent().?;
     try testing.expect(ev == .PayloadReceived);
+    try testing.expectEqual(@as(u16, body.len), ev.PayloadReceived.payload.len);
     try testing.expectEqual(@as(u8, 0xCD), ev.PayloadReceived.payload.body[0]);
 
     std.debug.print("\n  PASS: client sendPayload reaches server as PayloadReceived\n", .{});
@@ -245,6 +253,7 @@ test "UnreliableLatest drops older sequence via state machine relay" {
     try relayClientToServer(&cli, &srv, client_addr);
     try relayServerToClient(&srv, &cli);
     try relayClientToServer(&cli, &srv, client_addr);
+    try relayServerToClient(&srv, &cli);
     _ = cli.pollEvent();
     _ = srv.pollEvent();
 
@@ -291,6 +300,25 @@ test "reliable channel state stores and acks data" {
     try testing.expect(!state.entries[0].active);
 
     std.debug.print("\n  PASS: reliable channel state stores and acks data\n", .{});
+}
+
+test "default connect token wire round-trip and address authorization" {
+    const Token = zenet.handshake.DefaultConnectToken(opts.user_data_size, opts.max_token_addresses);
+
+    const secret_key = [_]u8{7} ** zenet.SECRET_KEY_SIZE;
+    const allowed_addr = testAddr(41000);
+    const denied_addr = testAddr(41001);
+    const user_data: [opts.user_data_size]u8 = [_]u8{0x5A} ** opts.user_data_size;
+
+    const token = try Token.create(99, 10_000, &.{allowed_addr}, user_data, &secret_key);
+    var buf: [Token.wire_size]u8 = undefined;
+    token.encode(&buf);
+
+    const decoded = Token.decode(&buf).?;
+    try testing.expect(decoded.verify(1_000, &secret_key));
+    try testing.expect(decoded.authorizeAddress(allowed_addr));
+    try testing.expect(!decoded.authorizeAddress(denied_addr));
+    try testing.expectEqualStrings(token.user_data[0..], decoded.user_data[0..]);
 }
 
 // ---------------------------------------------------------------------------
@@ -388,7 +416,7 @@ test "transport loopback: server sendOnChannel reaches client" {
     const msg = cli.pollMessage();
     try testing.expect(msg != null);
     try testing.expectEqual(@as(u8, 0), msg.?.channel_id);
-    // msg.len == max_user_data (protocol doesn't encode payload length in body)
+    try testing.expectEqual(@as(usize, "ping".len), msg.?.len);
     try testing.expectEqualStrings("ping", msg.?.data[0.."ping".len]);
 
     std.debug.print("\n  PASS: transport loopback: server sendOnChannel reaches client\n", .{});
@@ -416,7 +444,7 @@ test "transport loopback: client sendOnChannel reaches server" {
     const msg = srv.pollMessage();
     try testing.expect(msg != null);
     try testing.expectEqual(@as(u8, 2), msg.?.channel_id);
-    // msg.len == max_user_data (protocol doesn't encode payload length in body)
+    try testing.expectEqual(@as(usize, "hello reliable".len), msg.?.len);
     try testing.expectEqualStrings("hello reliable", msg.?.data[0.."hello reliable".len]);
 
     std.debug.print("\n  PASS: transport loopback: client sendOnChannel reaches server\n", .{});
@@ -480,4 +508,65 @@ test "transport loopback: client disconnect" {
         }
     }
     return error.DisconnectNotReceived;
+}
+
+test "transport loopback: client ignores packets from non-server address" {
+    var pair: LoopbackSocket.Pair = .{};
+
+    var cli = try TCli.initWithSocket(loopbackClientCfg(), pair.clientSocket(cli_addr));
+    defer cli.deinit();
+
+    var attacker = pair.serverSocket(std.net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, 20002));
+
+    try cli.connect();
+
+    var buf: [packet_mod.maxPacketSize(opts)]u8 = undefined;
+    const fake_pkt: Pkt = .{ .Challenge = .{
+        .sequence = 1,
+        .expires_at = 10_000,
+        .token = [_]u8{0xAA} ** 16,
+    } };
+    const len = try packet_mod.serialize(opts, fake_pkt, buf[0..]);
+    attacker.sendto(srv_addr, buf[0..len]);
+
+    cli.tick();
+
+    try testing.expectEqual(@as(usize, 1), pair.cli_to_srv.count);
+    try testing.expect(cli.pollEvent() == null);
+}
+
+test "transport loopback: reliable retransmit after lost ack does not redeliver" {
+    var pair: LoopbackSocket.Pair = .{};
+
+    var srv = try TSrv.initWithSocket(testing.allocator, transportServerCfg(), pair.serverSocket(srv_addr));
+    defer srv.deinit();
+
+    var cli = try TCli.initWithSocket(loopbackClientCfg(), pair.clientSocket(cli_addr));
+    defer cli.deinit();
+
+    try cli.connect();
+    _ = try handshake(&srv, &cli, 20);
+
+    try cli.sendOnChannel(2, "reliable");
+    cli.tick();
+    srv.tick();
+
+    const first = srv.pollMessage().?;
+    try testing.expectEqualStrings("reliable", first.data[0.."reliable".len]);
+
+    pair.srv_to_cli = .{}; // drop the first ACK
+
+    std.Thread.sleep(opts.reliable_resend_ns + (20 * std.time.ns_per_ms));
+    cli.tick();
+    srv.tick();
+
+    try testing.expect(srv.pollMessage() == null);
+
+    cli.tick(); // receive the ACK for the retransmission
+
+    std.Thread.sleep(opts.reliable_resend_ns + (20 * std.time.ns_per_ms));
+    cli.tick();
+    srv.tick();
+
+    try testing.expect(srv.pollMessage() == null);
 }

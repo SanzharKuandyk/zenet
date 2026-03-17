@@ -1,6 +1,8 @@
 const std = @import("std");
 
 pub const AddressKey = struct {
+    pub const WIRE_SIZE: usize = 18;
+
     ip: [16]u8, // IPv4 mapped into IPv6 or raw IPv6
     port: u16,
 
@@ -36,5 +38,19 @@ pub const AddressKey = struct {
 
     pub fn eql(a: AddressKey, b: AddressKey) bool {
         return std.mem.eql(u8, std.mem.asBytes(&a), std.mem.asBytes(&b));
+    }
+
+    pub fn encode(self: AddressKey, out: *[WIRE_SIZE]u8) void {
+        @memcpy(out[0..16], self.ip[0..]);
+        std.mem.writeInt(u16, out[16..18], self.port, .big);
+    }
+
+    pub fn decode(bytes: *const [WIRE_SIZE]u8) AddressKey {
+        var ip: [16]u8 = undefined;
+        @memcpy(ip[0..], bytes[0..16]);
+        return .{
+            .ip = ip,
+            .port = std.mem.readInt(u16, bytes[16..18], .big),
+        };
     }
 };

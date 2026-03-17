@@ -104,6 +104,14 @@ pub fn main() !void {
                 var dir: i8 = 0;
                 if (rl.isKeyDown(.w) or rl.isKeyDown(.up)) dir = -1;
                 if (rl.isKeyDown(.s) or rl.isKeyDown(.down)) dir = 1;
+
+                // Client-side prediction: move our paddle locally for instant feedback.
+                // The server's authoritative position overrides this when it arrives.
+                if (game.slot) |s| {
+                    game.paddles[s] += @as(f32, @floatFromInt(dir)) * proto.PADDLE_SPEED * rl.getFrameTime();
+                    game.paddles[s] = std.math.clamp(game.paddles[s], 0, proto.SCREEN_H - proto.PADDLE_H);
+                }
+
                 var buf: [proto.PLAYER_INPUT_SIZE]u8 = undefined;
                 proto.encodePlayerInput(&buf, dir);
                 // sendOnChannel(channel_id, data): CH_ACTION is Reliable, so the
@@ -122,6 +130,7 @@ pub fn main() !void {
             if (!chat_active and rl.isKeyPressed(.t)) {
                 chat_active = true;
                 chat_input_len = 0;
+                _ = rl.getCharPressed(); // discard the 't' that triggered this
             }
             if (chat_active) handleChatInput(&cli);
         }

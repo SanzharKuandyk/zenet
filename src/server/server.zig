@@ -20,11 +20,9 @@ pub fn Server(comptime opts: Options) type {
     }
 
     const pending_cap = opts.max_pending_clients orelse opts.max_clients * 2;
-
     const Conn = connection_mod.Connection(opts);
     const PendingConn = connection_mod.PendingConnection(opts);
     const Pkt = packet_mod.Packet(opts);
-    const pkt_size = @sizeOf(Pkt);
 
     return struct {
         const Self = @This();
@@ -52,8 +50,7 @@ pub fn Server(comptime opts: Options) type {
         };
 
         allocator: std.mem.Allocator,
-
-        protocol_id: u64,
+        protocol_id: u32,
         secure: bool,
         secret_key: ?[SECRET_KEY_SIZE]u8,
         public_addresses: []const std.net.Address,
@@ -71,7 +68,7 @@ pub fn Server(comptime opts: Options) type {
         clients: [opts.max_clients]?Conn,
         addr_to_slot: std.AutoArrayHashMap(AddressKey, usize),
         recycled_slots: RingQueue(u64, pending_cap),
-        slot_cursor: u64, // high-water mark: next never-used index in clients[]
+        slot_cursor: u64,
         pending: std.AutoArrayHashMap(AddressKey, PendingConn),
 
         outgoing: RingQueue(Outgoing, opts.outgoing_queue_size),
@@ -124,15 +121,22 @@ pub fn Server(comptime opts: Options) type {
             }
         }
 
-        /// Send a payload packet to a connected client.
-        pub fn sendPayload(self: *Self, cid: u64, body: [opts.max_payload_size]u8) ServerError!void {
+        pub fn sendPayload(self: *Self, cid: u64, body: []const u8) ServerError!void {
             const slot: usize = @intCast(cid);
-            const conn = &(self.clients[slot] orelse return ServerError.UnknownClient);
-            conn.send_seq += 1;
+            const conn = &(self.clients[slot] orelse return error.UnknownClient);
+            if (body.len > opts.max_payload_size) return error.PayloadTooLarge;
+
+            var payload: packet_mod.Payload(opts) = .{
+                .len = @intCast(body.len),
+                .body = [_]u8{0} ** opts.max_payload_size,
+            };
+            @memcpy(payload.body[0..body.len], body);
+
+            conn.last_send = self.getCurrentTime();
             if (!self.outgoing.pushBack(.{
                 .addr = conn.addr,
-                .packet = .{ .Payload = .{ .sequence = conn.send_seq, .body = body } },
-            })) return ServerError.IoError;
+                .packet = .{ .Payload = payload },
+            })) return error.IoError;
         }
 
         pub fn pollEvent(self: *Self) ?Event {
@@ -144,34 +148,47 @@ pub fn Server(comptime opts: Options) type {
         }
 
         pub fn handlePacket(self: *Self, addr: std.net.Address, buffer: []const u8) (ServerError || error{OutOfMemory})!void {
-            if (buffer.len < pkt_size) return ServerError.InvalidPacket;
-            const pkt = packet_mod.deserialize(opts, buffer[0..pkt_size].*);
+            const pkt = packet_mod.deserialize(opts, buffer) catch return error.InvalidPacket;
 
             switch (pkt) {
                 .ConnectionRequest => |req| {
+                    const key = AddressKey.fromAddress(addr);
+                    if (self.pending.contains(key) or self.addr_to_slot.contains(key))
+                        return error.InvalidPacket;
+
                     const Fields = struct {
                         protocol_id: u32,
                         client_nonce: u64,
                         user_data: ?[opts.user_data_size]u8,
                     };
+
                     const fields: Fields = switch (req) {
                         .Plain => |r| blk: {
-                            if (self.secure) return ServerError.InvalidPacket;
-                            break :blk .{ .protocol_id = r.protocol_id, .client_nonce = r.client_nonce, .user_data = null };
+                            if (self.secure) return error.InvalidPacket;
+                            break :blk .{
+                                .protocol_id = r.protocol_id,
+                                .client_nonce = r.client_nonce,
+                                .user_data = null,
+                            };
                         },
                         .Secure => |r| blk: {
-                            if (!self.secure) return ServerError.InvalidPacket;
-                            if (!r.token.verify(self.getCurrentTime(), &self.secret_key.?)) return ServerError.InvalidPacket;
-                            break :blk .{ .protocol_id = r.protocol_id, .client_nonce = r.client_nonce, .user_data = r.token.user_data };
+                            if (!self.secure or self.secret_key == null) return error.InvalidPacket;
+                            if (!r.token.verify(self.getCurrentTime(), &self.secret_key.?)) return error.InvalidPacket;
+                            if (!r.token.authorizeAddress(addr)) return error.InvalidPacket;
+                            break :blk .{
+                                .protocol_id = r.protocol_id,
+                                .client_nonce = r.client_nonce,
+                                .user_data = r.token.user_data,
+                            };
                         },
                     };
 
-                    if (self.protocol_id != fields.protocol_id) return ServerError.InvalidProtocolId;
-                    if (self.recent_nonces.contains(fields.client_nonce)) return ServerError.InvalidPacket;
+                    if (self.protocol_id != fields.protocol_id) return error.InvalidProtocolId;
+                    if (self.recent_nonces.contains(fields.client_nonce)) return error.InvalidPacket;
                     _ = try self.recent_nonces.insert(fields.client_nonce);
 
                     const cid: u64 = self.recycled_slots.popFront() orelse blk: {
-                        if (self.slot_cursor >= opts.max_clients) return ServerError.ServerFull;
+                        if (self.slot_cursor >= opts.max_clients) return error.ServerFull;
                         const s = self.slot_cursor;
                         self.slot_cursor += 1;
                         break :blk s;
@@ -187,24 +204,30 @@ pub fn Server(comptime opts: Options) type {
                         expires_at,
                     );
 
-                    const gop = try self.pending.getOrPut(AddressKey.fromAddress(addr));
-                    if (gop.found_existing) return ServerError.InvalidPacket;
-                    gop.value_ptr.* = PendingConn{
+                    try self.pending.put(key, .{
                         .cid = cid,
                         .client_nonce = fields.client_nonce,
                         .sequence = self.challenge_seq,
                         .expires_at = expires_at,
                         .user_data = fields.user_data,
-                    };
+                    });
 
                     if (!self.outgoing.pushBack(.{
                         .addr = addr,
-                        .packet = .{ .Challenge = .{ .sequence = self.challenge_seq, .expires_at = expires_at, .token = token } },
-                    })) return ServerError.IoError;
+                        .packet = .{ .Challenge = .{
+                            .sequence = self.challenge_seq,
+                            .expires_at = expires_at,
+                            .token = token,
+                        } },
+                    })) return error.IoError;
                 },
                 .ConnectionResponse => |resp| {
                     const key = AddressKey.fromAddress(addr);
-                    const pending = self.pending.get(key) orelse return ServerError.UnknownClient;
+                    const pending = self.pending.get(key) orelse return error.UnknownClient;
+                    if (self.getCurrentTime() > pending.expires_at) {
+                        _ = self.pending.swapRemove(key);
+                        return error.Expired;
+                    }
 
                     const valid = handshake.verifyChallengeToken(
                         resp.token,
@@ -214,48 +237,57 @@ pub fn Server(comptime opts: Options) type {
                         resp.sequence,
                         pending.expires_at,
                     );
-                    if (!valid) return ServerError.InvalidPacket;
+                    if (!valid) return error.InvalidPacket;
 
                     _ = self.pending.swapRemove(key);
 
                     const slot: usize = @intCast(pending.cid);
-                    self.clients[slot] = Conn{
+                    self.clients[slot] = .{
                         .cid = pending.cid,
                         .addr = addr,
                         .last_recv = self.getCurrentTime(),
                         .last_send = 0,
-                        .last_recv_seq = 0,
-                        .send_seq = 0,
                         .user_data = pending.user_data,
                     };
                     try self.addr_to_slot.put(key, slot);
 
+                    if (!self.outgoing.pushBack(.{
+                        .addr = addr,
+                        .packet = .ConnectionAccepted,
+                    })) return error.IoError;
+
                     if (!self.events.pushBack(.{
-                        .ClientConnected = .{ .cid = pending.cid, .addr = addr, .user_data = pending.user_data },
-                    })) return ServerError.IoError;
+                        .ClientConnected = .{
+                            .cid = pending.cid,
+                            .addr = addr,
+                            .user_data = pending.user_data,
+                        },
+                    })) return error.IoError;
                 },
                 .Payload => |payload| {
-                    const slot = self.addr_to_slot.get(AddressKey.fromAddress(addr)) orelse return ServerError.UnknownClient;
+                    const slot = self.addr_to_slot.get(AddressKey.fromAddress(addr)) orelse return error.UnknownClient;
                     const conn = &self.clients[slot].?;
-                    if (payload.sequence <= conn.last_recv_seq) return ServerError.InvalidPacket;
-                    conn.last_recv_seq = payload.sequence;
+                    conn.last_recv = self.getCurrentTime();
                     if (!self.events.pushBack(.{
-                        .PayloadReceived = .{ .cid = conn.cid, .addr = conn.addr, .payload = payload },
-                    })) return ServerError.IoError;
+                        .PayloadReceived = .{
+                            .cid = conn.cid,
+                            .addr = conn.addr,
+                            .payload = payload,
+                        },
+                    })) return error.IoError;
                 },
                 .Disconnect => {
                     const key = AddressKey.fromAddress(addr);
-                    const slot = self.addr_to_slot.get(key) orelse return ServerError.UnknownClient;
+                    const slot = self.addr_to_slot.get(key) orelse return error.UnknownClient;
                     const conn = self.clients[slot].?;
                     self.clients[slot] = null;
                     _ = self.addr_to_slot.swapRemove(key);
                     _ = self.recycled_slots.pushBack(conn.cid);
                     if (!self.events.pushBack(.{
                         .ClientDisconnected = .{ .cid = conn.cid, .addr = addr },
-                    })) return ServerError.IoError;
+                    })) return error.IoError;
                 },
-
-                .Challenge => return ServerError.InvalidPacket,
+                .Challenge, .ConnectionAccepted => return error.InvalidPacket,
             }
         }
     };

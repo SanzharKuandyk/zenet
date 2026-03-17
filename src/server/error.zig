@@ -5,4 +5,5 @@ pub const ServerError = error{
     InvalidPacket,
     UnknownClient,
     InvalidProtocolId,
+    PayloadTooLarge,
 };

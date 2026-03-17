@@ -111,6 +111,25 @@ pub fn ReliableState(comptime buf_size: usize, comptime data_cap: usize) type {
     };
 }
 
+pub const ReliableRecvAction = enum {
+    deliver,
+    duplicate,
+    future,
+};
+
+pub const ReliableRecvState = struct {
+    next_seq: u16 = 1,
+
+    pub fn classify(self: *ReliableRecvState, seq: u16) ReliableRecvAction {
+        if (seq == self.next_seq) {
+            self.next_seq +%= 1;
+            return .deliver;
+        }
+        if (seqGreater(seq, self.next_seq)) return .future;
+        return .duplicate;
+    }
+};
+
 /// Sequence comparison with 16-bit wrapping (half-space rule).
 /// Returns true if `a` is strictly after `b` in sequence space.
 pub fn seqGreater(a: u16, b: u16) bool {

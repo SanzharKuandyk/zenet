@@ -302,7 +302,7 @@ cli.disconnect(); // graceful
 
 ```zig
 const cfg = zenet.ServerConfig.init(
-    protocol_id,          // u64  — must match client
+    protocol_id,          // u32  — must match client
     handshake_alive_ns,   // u64  — ns; pending handshake lifetime
     client_timeout_ns,    // u64  — ns; idle disconnect threshold
     public_addresses,     // []const std.net.Address  (secure mode)
@@ -389,7 +389,10 @@ to carry a signed token issued by a trusted matchmaking server.
 
 ```zig
 // matchmaking server — has the secret key
-const token = zenet.handshake.DefaultConnectToken(opts.user_data_size).create(
+const token = try zenet.handshake.DefaultConnectToken(
+    opts.user_data_size,
+    opts.max_token_addresses,
+).create(
     client_id,
     expires_at,       // absolute ns timestamp
     public_addresses, // []const std.net.Address
@@ -408,17 +411,23 @@ The compiler validates the signatures precisely:
 
 ```zig
 const MyToken = struct {
-    // Arbitrary fields (sig, metadata, …)
+    pub const wire_size = 128; // exact byte size on the wire
+
     user_data: [opts.user_data_size]u8, // required field, exact type
 
-    // Called by the server on every ConnectionRequest.
-    //   now        — current time in ns (from Instant.since)
-    //   secret_key — server's 32-byte secret
-    // Return true if the token is valid and unexpired.
+    pub fn encode(self: *const MyToken, out: *[wire_size]u8) void { ... }
+
+    pub fn decode(bytes: *const [wire_size]u8) ?MyToken { ... }
+
     pub fn verify(
         self:       *const MyToken,
         now:        u64,
         secret_key: *const [32]u8,
+    ) bool { ... }
+
+    pub fn authorizeAddress(
+        self: *const MyToken,
+        addr: std.net.Address,
     ) bool { ... }
 };
 ```
@@ -426,10 +435,10 @@ const MyToken = struct {
 Errors emitted when the interface is wrong:
 
 ```
-ConnectToken must have: pub fn verify(*const @This(), u64, *const [32]u8) bool
-ConnectToken.verify param[0] must be *const @This(), got *MyToken
-ConnectToken.verify must return bool, got void
-ConnectToken.user_data must be [opts.user_data_size]u8
+ConnectToken must have: pub const wire_size: usize
+ConnectToken must have: pub fn encode(*const @This(), *[wire_size]u8) void
+ConnectToken must have: pub fn decode(*const [wire_size]u8) ?@This()
+ConnectToken must have: pub fn authorizeAddress(*const @This(), std.net.Address) bool
 ```
 
 ---
@@ -468,7 +477,7 @@ while (srv.pollEvent()) |ev| {
 }
 
 // send a raw payload to a connected client
-try srv.sendPayload(cid, payload_body); // payload_body: [opts.max_payload_size]u8
+try srv.sendPayload(cid, payload_body); // payload_body: []const u8
 ```
 
 ### Client
@@ -497,7 +506,7 @@ while (cli.pollEvent()) |ev| {
     }
 }
 
-try cli.sendPayload(payload_body);
+try cli.sendPayload(payload_body); // payload_body: []const u8
 
 cli.disconnect();
 ```

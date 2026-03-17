@@ -17,6 +17,9 @@ pub const Options = struct {
     nonce_window: usize = 256,
     outgoing_queue_size: usize = 256,
     events_queue_size: usize = 256,
+    /// Maximum number of client public addresses carried by the built-in token.
+    /// Must fit in a u8 because the wire format stores the count in one byte.
+    max_token_addresses: usize = 8,
     user_data_size: usize = 256,
     max_payload_size: usize = 1024,
     /// User-provided ConnectToken type. `void` = use zenet's built-in default.
