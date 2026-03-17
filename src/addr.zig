@@ -11,7 +11,7 @@ pub const AddressKey = struct {
         };
 
         switch (addr.any.family) {
-            std.os.AF.INET => {
+            std.posix.AF.INET => {
                 // 0000:0000:0000:0000:0000:ffff:XXXX:XXXX
                 const a = addr.in;
                 out.ip[10] = 0xff;
@@ -19,7 +19,7 @@ pub const AddressKey = struct {
                 @memcpy(out.ip[12..16], std.mem.asBytes(&a.sa.addr));
                 out.port = std.mem.bigToNative(u16, a.sa.port);
             },
-            std.os.AF.INET6 => {
+            std.posix.AF.INET6 => {
                 const a = addr.in6;
                 @memcpy(out.ip[0..16], &a.sa.addr);
                 out.port = std.mem.bigToNative(u16, a.sa.port);

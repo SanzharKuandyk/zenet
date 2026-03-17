@@ -3,6 +3,7 @@
 // 2. (server) Challenge
 // 3. (client) ConnectionResponse
 
+const std = @import("std");
 const handshake = @import("handshake.zig");
 const Options = @import("root.zig").Options;
 
@@ -19,11 +20,11 @@ pub fn Packet(comptime opts: Options) type {
 }
 
 pub fn serialize(comptime opts: Options, p: Packet(opts)) [@sizeOf(Packet(opts))]u8 {
-    return @bitCast(p);
+    return std.mem.toBytes(p);
 }
 
 pub fn deserialize(comptime opts: Options, bytes: [@sizeOf(Packet(opts))]u8) Packet(opts) {
-    return @bitCast(bytes);
+    return std.mem.bytesToValue(Packet(opts), &bytes);
 }
 
 pub fn ConnectionRequest(comptime opts: Options) type {

@@ -25,3 +25,7 @@ pub const Server = @import("server/server.zig").Server;
 pub const ServerConfig = @import("server/config.zig").ServerConfig;
 pub const ServerError = @import("server/error.zig").ServerError;
 pub const handshake = @import("handshake.zig");
+
+pub const TransportServer = @import("transport/server.zig").TransportServer;
+pub const TransportClient = @import("transport/client.zig").TransportClient;
+pub const UdpSocket = @import("transport/udp.zig").UdpSocket;

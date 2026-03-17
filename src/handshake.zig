@@ -40,7 +40,7 @@ pub fn verifyChallengeToken(
     expires_at: u64,
 ) bool {
     const expected = generateChallengeToken(challenge_key, cid, client_nonce, sequence, expires_at);
-    return std.crypto.timing_safe.eql(u8, expected[0..], token[0..]);
+    return std.crypto.timing_safe.eql([16]u8, expected, token);
 }
 
 /// Secure connection token issued by a matchmaking/lobby server.
@@ -80,7 +80,7 @@ pub fn DefaultConnectToken(comptime user_data_size: usize) type {
         ) bool {
             if (now > self.expires_at) return false;
             const expected = self.computeMac(secret_key);
-            return std.crypto.timing_safe.eql(u8, expected[0..], self.mac[0..]);
+            return std.crypto.timing_safe.eql([16]u8, expected, self.mac);
         }
 
         fn computeMac(self: *const Self, secret_key: *const [SECRET_KEY_SIZE]u8) [16]u8 {

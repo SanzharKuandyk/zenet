@@ -11,7 +11,8 @@ inspired by [renet](https://github.com/lucaspoffo/renet)
 - Plain and secure connection modes (secure requires a signed connect token from a lobby/matchmaking server)
 - Replay attack protection via nonce window
 - Comptime-parameterized `Server` and `Client` — wire format, queue sizes, and max clients are all compile-time constants
-- Transport-agnostic: the library is a pure state machine; you own the socket
+- Transport-agnostic: pure state machine core; bring your own socket
+- Built-in UDP transport (`TransportServer` / `TransportClient`) for the common case
 
 ## Requirements
 
@@ -19,16 +20,77 @@ Zig `0.15.2`
 
 ## Usage
 
-Both `Server` and `Client` are configured with a shared `Options` struct. Both sides must use identical options — the wire format depends on it.
+Both sides share an `Options` struct — the wire format depends on it.
 
 ```zig
-const zenet = @import("zenet");
-
 const opts: zenet.Options = .{
     .max_clients = 1024,
     .max_payload_size = 512,
 };
 ```
+
+### Transport wrapper (UDP, common case)
+
+`TransportServer` / `TransportClient` own the socket and drive the I/O loop. Pass `void` as the second argument to use the built-in UDP transport.
+
+```zig
+const Srv = zenet.TransportServer(opts, void);
+
+var srv = try Srv.init(allocator, config, try std.net.Address.parseIp4("0.0.0.0", 9000));
+defer srv.deinit();
+
+// each tick
+srv.tick();
+
+while (srv.pollEvent()) |ev| {
+    switch (ev) {
+        .ClientConnected    => |e| { _ = e.cid; },
+        .ClientDisconnected => |e| { _ = e.cid; },
+        .PayloadReceived    => |e| { _ = e.payload; },
+    }
+}
+```
+
+```zig
+const Cli = zenet.TransportClient(opts, void);
+
+var client = try Cli.init(.{ .protocol_id = 1, .server_addr = server_addr }, bind_addr);
+defer client.deinit();
+
+try client.connect();
+
+// each tick
+client.tick();
+
+while (client.pollEvent()) |ev| {
+    switch (ev) {
+        .Connected       => {},
+        .Disconnected    => {},
+        .PayloadReceived => |p| { _ = p; },
+    }
+}
+```
+
+### Custom transport
+
+Pass any type that satisfies the socket interface:
+
+```zig
+const MySocket = struct {
+    pub fn open(addr: std.net.Address) !MySocket { ... }
+    pub fn close(self: *MySocket) void { ... }
+    pub fn recvfrom(self: *MySocket, buf: []u8) ?struct { addr: std.net.Address, len: usize } { ... }
+    pub fn sendto(self: *MySocket, addr: std.net.Address, data: []const u8) void { ... }
+};
+
+const Srv = zenet.TransportServer(opts, MySocket);
+```
+
+Missing declarations produce a clear `@compileError`.
+
+### Raw state machine (no transport)
+
+`Server` / `Client` are untouched — you drive the socket yourself.
 
 ### Server
 
@@ -112,6 +174,10 @@ src/
   ring_buffer.zig   — fixed-size queue
   server/           — server state machine
   client/           — client state machine
+  transport/
+    udp.zig         — built-in non-blocking UDP socket
+    server.zig      — TransportServer wrapper
+    client.zig      — TransportClient wrapper
 ```
 
 ## License

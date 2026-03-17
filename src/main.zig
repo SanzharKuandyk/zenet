@@ -7,7 +7,7 @@ const opts: zenet.Options = .{
     .max_payload_size = 512,
 };
 
-const Server = zenet.Server(opts);
+const Srv = zenet.TransportServer(opts, void);
 
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
@@ -23,9 +23,17 @@ pub fn main() !void {
         null,
     );
 
-    var srv = try Server.init(allocator, cfg);
+    const bind = try std.net.Address.parseIp4("0.0.0.0", 9000);
+    var srv = try Srv.init(allocator, cfg, bind);
     defer srv.deinit();
 
-    const now = try std.time.Instant.now();
-    srv.update(now);
+    srv.tick();
+
+    while (srv.pollEvent()) |event| {
+        switch (event) {
+            .ClientConnected => |e| std.debug.print("connected: {}\n", .{e.cid}),
+            .ClientDisconnected => |e| std.debug.print("disconnected: {}\n", .{e.cid}),
+            .PayloadReceived => |e| std.debug.print("payload from: {}\n", .{e.cid}),
+        }
+    }
 }
