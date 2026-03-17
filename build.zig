@@ -143,14 +143,126 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_exe_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
-    //
-    // The Zig build system is entirely implemented in userland, which means
-    // that it cannot hook into private compiler APIs. All compilation work
-    // orchestrated by the build system will result in other Zig compiler
-    // subcommands being invoked with the right flags defined. You can observe
-    // these invocations when one fails (or you pass a flag to increase
-    // verbosity) to validate assumptions and diagnose problems.
-    //
-    // Lastly, the Zig build system is relatively simple and self-contained,
-    // and reading its source code will allow you to master it.
+
+    // -----------------------------------------------------------------------
+    // Examples
+    // -----------------------------------------------------------------------
+
+    // Pong — shared protocol module used by both server and client
+    const pong_protocol = b.createModule(.{
+        .root_source_file = b.path("examples/pong/protocol.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "zenet", .module = mod },
+        },
+    });
+
+    // Pong server (headless — no raylib needed)
+    const pong_server = b.addExecutable(.{
+        .name = "pong-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/pong/server.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zenet", .module = mod },
+                .{ .name = "protocol", .module = pong_protocol },
+            },
+        }),
+    });
+    b.installArtifact(pong_server);
+
+    const run_pong_server = b.addRunArtifact(pong_server);
+    run_pong_server.step.dependOn(b.getInstallStep());
+    const pong_server_step = b.step("pong-server", "Run the pong server");
+    pong_server_step.dependOn(&run_pong_server.step);
+
+    // Pong client (uses raylib-zig)
+    const raylib_dep = b.dependency("raylib_zig", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const raylib = raylib_dep.module("raylib");
+    const raylib_artifact = raylib_dep.artifact("raylib");
+
+    const pong_client = b.addExecutable(.{
+        .name = "pong-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/pong/client.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zenet", .module = mod },
+                .{ .name = "protocol", .module = pong_protocol },
+                .{ .name = "raylib", .module = raylib },
+            },
+        }),
+    });
+    pong_client.root_module.linkLibrary(raylib_artifact);
+    b.installArtifact(pong_client);
+
+    const run_pong_client = b.addRunArtifact(pong_client);
+    run_pong_client.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_pong_client.addArgs(args);
+    }
+    const pong_client_step = b.step("pong-client", "Run the pong client");
+    pong_client_step.dependOn(&run_pong_client.step);
+
+    // -----------------------------------------------------------------------
+    // Ball — minimal two-channel demo (Reliable ball/events + Unreliable chat)
+    // -----------------------------------------------------------------------
+
+    const ball_protocol = b.createModule(.{
+        .root_source_file = b.path("examples/ball/protocol.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "zenet", .module = mod },
+        },
+    });
+
+    const ball_server = b.addExecutable(.{
+        .name = "ball-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/ball/server.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zenet", .module = mod },
+                .{ .name = "protocol", .module = ball_protocol },
+            },
+        }),
+    });
+    b.installArtifact(ball_server);
+
+    const run_ball_server = b.addRunArtifact(ball_server);
+    run_ball_server.step.dependOn(b.getInstallStep());
+    const ball_server_step = b.step("ball-server", "Run the ball server");
+    ball_server_step.dependOn(&run_ball_server.step);
+
+    const ball_client = b.addExecutable(.{
+        .name = "ball-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/ball/client.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zenet", .module = mod },
+                .{ .name = "protocol", .module = ball_protocol },
+                .{ .name = "raylib", .module = raylib },
+            },
+        }),
+    });
+    ball_client.root_module.linkLibrary(raylib_artifact);
+    b.installArtifact(ball_client);
+
+    const run_ball_client = b.addRunArtifact(ball_client);
+    run_ball_client.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_ball_client.addArgs(args);
+    }
+    const ball_client_step = b.step("ball-client", "Run the ball client");
+    ball_client_step.dependOn(&run_ball_client.step);
 }

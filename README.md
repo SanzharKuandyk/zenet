@@ -10,6 +10,39 @@ unreliable UDP. Inspired by [renet](https://github.com/lucaspoffo/renet).
 
 ---
 
+## Examples
+
+Two worked examples are included under `examples/`. Each has a headless server and a graphical client built with [raylib-zig](https://github.com/raylib-zig/raylib-zig).
+
+### Ball
+
+Up to 4 clients move colored balls around a shared window. Demonstrates two channels: Reliable for position updates and session events, Unreliable for chat.
+
+![Ball example](examples/ball/balls.gif)
+
+```sh
+zig build ball-server          # terminal 1
+zig build ball-client          # terminal 2 (repeat for more clients)
+zig build ball-client -- 1.2.3.4   # connect to a remote server
+```
+
+Controls: `WASD` to move · `T` to chat · `Esc` to cancel chat
+
+### Pong
+
+Two-player networked pong. Demonstrates three channels: Reliable for ball state, Reliable for paddle input, Unreliable for chat.
+
+```sh
+zig build pong-server          # terminal 1
+zig build pong-client          # terminal 2
+zig build pong-client          # terminal 3
+zig build pong-client -- 1.2.3.4   # connect to a remote server
+```
+
+Controls: `W`/`S` to move · `T` to chat · `Space` to ready up after a round
+
+---
+
 ## Contents
 
 - [Quick start](#quick-start)
