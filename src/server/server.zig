@@ -15,12 +15,8 @@ const SECRET_KEY_SIZE = root.SECRET_KEY_SIZE;
 
 pub fn Server(comptime opts: Options) type {
     comptime {
-        if (opts.ConnectToken != void) {
-            if (!@hasDecl(opts.ConnectToken, "verify"))
-                @compileError("ConnectToken must have: pub fn verify(*const @This(), u64, *const [32]u8) bool");
-            if (!@hasField(opts.ConnectToken, "user_data"))
-                @compileError("ConnectToken must have: user_data: [opts.user_data_size]u8");
-        }
+        if (opts.ConnectToken != void)
+            handshake.validateConnectTokenInterface(opts.ConnectToken, opts.user_data_size);
     }
 
     const pending_cap = opts.max_pending_clients orelse opts.max_clients * 2;

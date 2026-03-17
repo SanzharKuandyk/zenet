@@ -42,6 +42,7 @@ pub const ServerError = @import("server/error.zig").ServerError;
 pub const TransportServer = @import("transport/server.zig").TransportServer;
 pub const TransportClient = @import("transport/client.zig").TransportClient;
 pub const UdpSocket = @import("transport/udp.zig").UdpSocket;
+pub const LoopbackSocket = @import("transport/loopback.zig").LoopbackSocket;
 
 comptime {
     _ = @import("channel.zig");

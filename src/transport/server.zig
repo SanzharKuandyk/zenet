@@ -3,6 +3,7 @@ const root = @import("../root.zig");
 const packet_mod = @import("../packet.zig");
 const server_mod = @import("../server/server.zig");
 const channel_mod = @import("../channel.zig");
+const socket_mod = @import("socket.zig");
 const RingQueue = @import("../ring_buffer.zig").RingQueue;
 const UdpSocket = @import("udp.zig").UdpSocket;
 
@@ -10,16 +11,7 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
     const Socket = if (SocketType == void) UdpSocket else SocketType;
 
     comptime {
-        if (SocketType != void) {
-            if (!@hasDecl(SocketType, "open"))
-                @compileError("Socket must have: pub fn open(std.net.Address) !@This()");
-            if (!@hasDecl(SocketType, "close"))
-                @compileError("Socket must have: pub fn close(*@This()) void");
-            if (!@hasDecl(SocketType, "recvfrom"))
-                @compileError("Socket must have: pub fn recvfrom(*@This(), []u8) ?Recv");
-            if (!@hasDecl(SocketType, "sendto"))
-                @compileError("Socket must have: pub fn sendto(*@This(), std.net.Address, []const u8) void");
-        }
+        if (SocketType != void) socket_mod.validateSocketInterface(Socket);
         if (opts.channels.len == 0)
             @compileError("Options.channels must have at least one entry");
     }
@@ -65,7 +57,11 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
 
         srv: Srv,
         socket: Socket,
-        channel_state: [opts.max_clients][channel_count]PerChannelState,
+        /// Heap-allocated: [max_clients][channel_count]PerChannelState.
+        /// Stored behind a pointer because its size is O(max_clients × channel_count
+        /// × reliable_buffer × max_payload_size) and would overflow the stack inline.
+        channel_state: *[opts.max_clients][channel_count]PerChannelState,
+        allocator: std.mem.Allocator,
         events: RingQueue(Event, opts.events_queue_size),
         messages: RingQueue(Message, opts.messages_queue_size),
 
@@ -75,13 +71,21 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
                 var s = socket;
                 s.close();
             }
+            return initWithSocket(allocator, config, socket);
+        }
+
+        /// Initialise with a pre-created socket (e.g. `LoopbackSocket` from a test pair).
+        /// The socket is owned by Self after this call; `deinit` will call `socket.close()`.
+        pub fn initWithSocket(allocator: std.mem.Allocator, config: root.ServerConfig, socket: Socket) !Self {
+            const channel_state = try allocator.create([opts.max_clients][channel_count]PerChannelState);
+            errdefer allocator.destroy(channel_state);
+            for (channel_state) |*row| row.* = [_]PerChannelState{.{}} ** channel_count;
             const srv = try Srv.init(allocator, config);
             return .{
                 .srv = srv,
                 .socket = socket,
-                .channel_state = [_][channel_count]PerChannelState{
-                    [_]PerChannelState{.{}} ** channel_count,
-                } ** opts.max_clients,
+                .channel_state = channel_state,
+                .allocator = allocator,
                 .events = .{},
                 .messages = .{},
             };
@@ -90,6 +94,7 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
         pub fn deinit(self: *Self) void {
             self.srv.deinit();
             self.socket.close();
+            self.allocator.destroy(self.channel_state);
         }
 
         pub fn tick(self: *Self) void {

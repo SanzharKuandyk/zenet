@@ -1,11 +1,10 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const native_os = builtin.os.tag;
+const RecvResult = @import("socket.zig").RecvResult;
 
 pub const UdpSocket = struct {
     fd: std.posix.socket_t,
-
-    const RecvResult = struct { addr: std.net.Address, len: usize };
 
     pub fn open(addr: std.net.Address) !UdpSocket {
         const flags: u32 = std.posix.SOCK.DGRAM | std.posix.SOCK.NONBLOCK;

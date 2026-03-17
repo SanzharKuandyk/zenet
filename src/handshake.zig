@@ -3,6 +3,47 @@ const AddressKey = @import("addr.zig").AddressKey;
 const SECRET_KEY_SIZE = @import("root.zig").SECRET_KEY_SIZE;
 const CHALLENGE_KEY_SIZE = @import("root.zig").CHALLENGE_KEY_SIZE;
 
+/// Compile-time validation that T implements the ConnectToken interface:
+///
+///   pub fn verify(*const T, u64, *const [32]u8) bool
+///   user_data: [user_data_size]u8
+///
+/// Call inside a `comptime { }` block.
+pub fn validateConnectTokenInterface(comptime T: type, comptime user_data_size: usize) void {
+    // verify(*const T, u64, *const [SECRET_KEY_SIZE]u8) bool
+    if (!@hasDecl(T, "verify"))
+        @compileError("ConnectToken must have: pub fn verify(*const @This(), u64, *const [32]u8) bool");
+    switch (@typeInfo(@TypeOf(T.verify))) {
+        .@"fn" => |fi| {
+            if (fi.params.len != 3)
+                @compileError("ConnectToken.verify must take exactly 3 parameters: (*const @This(), u64, *const [32]u8)");
+            const p0 = fi.params[0].type orelse
+                @compileError("ConnectToken.verify param[0] must be a concrete type (*const @This())");
+            if (p0 != *const T)
+                @compileError("ConnectToken.verify param[0] must be *const @This(), got " ++ @typeName(p0));
+            const p1 = fi.params[1].type orelse
+                @compileError("ConnectToken.verify param[1] must be u64");
+            if (p1 != u64)
+                @compileError("ConnectToken.verify param[1] must be u64, got " ++ @typeName(p1));
+            const p2 = fi.params[2].type orelse
+                @compileError("ConnectToken.verify param[2] must be *const [32]u8");
+            if (p2 != *const [SECRET_KEY_SIZE]u8)
+                @compileError("ConnectToken.verify param[2] must be *const [32]u8, got " ++ @typeName(p2));
+            const ret = fi.return_type orelse
+                @compileError("ConnectToken.verify return type must be bool");
+            if (ret != bool)
+                @compileError("ConnectToken.verify must return bool, got " ++ @typeName(ret));
+        },
+        else => @compileError("ConnectToken.verify must be a function"),
+    }
+
+    // user_data: [user_data_size]u8
+    if (!@hasField(T, "user_data"))
+        @compileError("ConnectToken must have field: user_data: [opts.user_data_size]u8");
+    if (@FieldType(T, "user_data") != [user_data_size]u8)
+        @compileError("ConnectToken.user_data must be [opts.user_data_size]u8");
+}
+
 pub const ChallengeToken = [16]u8;
 
 /// Generates the HMAC token for the challenge handshake.

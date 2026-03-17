@@ -5,6 +5,7 @@ const client_mod = @import("../client/client.zig");
 const channel_mod = @import("../channel.zig");
 const RingQueue = @import("../ring_buffer.zig").RingQueue;
 const UdpSocket = @import("udp.zig").UdpSocket;
+const socket_mod = @import("socket.zig");
 
 /// Wraps a Client state machine and a socket, driving the full I/O loop.
 /// SocketType = void uses the built-in UdpSocket; pass any type satisfying
@@ -12,18 +13,8 @@ const UdpSocket = @import("udp.zig").UdpSocket;
 pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) type {
     const Socket = if (SocketType == void) UdpSocket else SocketType;
 
-    // Validate the custom socket interface at compile time.
     comptime {
-        if (SocketType != void) {
-            if (!@hasDecl(SocketType, "open"))
-                @compileError("Socket must have: pub fn open(std.net.Address) !@This()");
-            if (!@hasDecl(SocketType, "close"))
-                @compileError("Socket must have: pub fn close(*@This()) void");
-            if (!@hasDecl(SocketType, "recvfrom"))
-                @compileError("Socket must have: pub fn recvfrom(*@This(), []u8) ?Recv");
-            if (!@hasDecl(SocketType, "sendto"))
-                @compileError("Socket must have: pub fn sendto(*@This(), std.net.Address, []const u8) void");
-        }
+        if (SocketType != void) socket_mod.validateSocketInterface(Socket);
         if (opts.channels.len == 0)
             @compileError("Options.channels must have at least one entry");
     }
@@ -78,6 +69,19 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
                 var s = socket;
                 s.close();
             }
+            const cli = try Cli.init(config);
+            return .{
+                .cli = cli,
+                .socket = socket,
+                .channel_state = [_]PerChannelState{.{}} ** channel_count,
+                .events = .{},
+                .messages = .{},
+            };
+        }
+
+        /// Initialise with a pre-created socket (e.g. `LoopbackSocket` from a test pair).
+        /// The socket is owned by Self after this call; `deinit` will call `socket.close()`.
+        pub fn initWithSocket(config: root.ClientConfig, socket: Socket) !Self {
             const cli = try Cli.init(config);
             return .{
                 .cli = cli,

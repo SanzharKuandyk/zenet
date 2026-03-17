@@ -1,4 +1,3 @@
-/// (claude generated. TODO: review properly)
 /// Integration tests for zenet server/client state machines and channel logic.
 /// These tests exercise the state machines directly — no sockets required.
 const std = @import("std");
@@ -6,6 +5,9 @@ const testing = std.testing;
 const zenet = @import("root.zig");
 const packet_mod = @import("packet.zig");
 const channel_mod = @import("channel.zig");
+const LoopbackSocket = @import("transport/loopback.zig").LoopbackSocket;
+const TransportServer = @import("transport/server.zig").TransportServer;
+const TransportClient = @import("transport/client.zig").TransportClient;
 
 // Re-export channel unit tests so `zig build test` picks them up.
 comptime {
@@ -288,4 +290,163 @@ test "reliable channel state stores and acks data" {
     try testing.expect(!state.entries[0].active);
 
     std.debug.print("\n  PASS: reliable channel state stores and acks data\n", .{});
+}
+
+// ---------------------------------------------------------------------------
+// Transport-layer integration tests using LoopbackSocket
+// ---------------------------------------------------------------------------
+
+const TSrv = TransportServer(opts, LoopbackSocket);
+const TCli = TransportClient(opts, LoopbackSocket);
+
+/// Addresses used as fake local endpoints for loopback sockets.
+const srv_addr = std.net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, 20000);
+const cli_addr = std.net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, 20001);
+
+/// Server config suitable for transport-layer tests that run tick() with real
+/// time.  getCurrentTime() returns nanoseconds (via Instant.since), so the
+/// _ms-named fields must hold nanosecond values large enough to survive the
+/// delay between tick() calls (typically tens to hundreds of microseconds).
+fn transportServerCfg() zenet.ServerConfig {
+    const ns_per_s = std.time.ns_per_s;
+    return zenet.ServerConfig.init(1, 5 * ns_per_s, 30 * ns_per_s, &.{}, false, [_]u8{0} ** 32, null);
+}
+
+fn loopbackClientCfg() zenet.ClientConfig {
+    const ns_per_s = std.time.ns_per_s;
+    return .{
+        .protocol_id = 1,
+        .server_addr = srv_addr,
+        .connect_timeout_ms = 5 * ns_per_s,
+        .timeout_ms = 30 * ns_per_s,
+    };
+}
+
+/// Run up to `max_ticks` alternating tick() pairs until both the server and
+/// client have emitted their first event.  Returns {srv_ev, cli_ev}.
+fn handshake(srv: *TSrv, cli: *TCli, max_ticks: usize) !struct { TSrv.Event, TCli.Event } {
+    var i: usize = 0;
+    while (i < max_ticks) : (i += 1) {
+        cli.tick();
+        srv.tick();
+        const se = srv.pollEvent();
+        const ce = cli.pollEvent();
+        if (se != null and ce != null) return .{ se.?, ce.? };
+        // If only one side fired an event keep running; events queue up
+        // independently so the other will fire on a subsequent tick.
+        if (se != null or ce != null) {
+            // drain the remaining side
+            var j: usize = 0;
+            while (j < max_ticks) : (j += 1) {
+                cli.tick();
+                srv.tick();
+                const se2 = if (se == null) srv.pollEvent() else null;
+                const ce2 = if (ce == null) cli.pollEvent() else null;
+                if (se2 != null or ce2 != null)
+                    return .{ se orelse se2.?, ce orelse ce2.? };
+            }
+            return error.HandshakeTimeout;
+        }
+    }
+    return error.HandshakeTimeout;
+}
+
+test "transport loopback: connect handshake" {
+    var pair: LoopbackSocket.Pair = .{};
+
+    var srv = try TSrv.initWithSocket(testing.allocator, transportServerCfg(), pair.serverSocket(srv_addr));
+    defer srv.deinit();
+
+    var cli = try TCli.initWithSocket(loopbackClientCfg(), pair.clientSocket(cli_addr));
+    defer cli.deinit();
+
+    try cli.connect();
+
+    const evs = try handshake(&srv, &cli, 20);
+    try testing.expect(evs[0] == .ClientConnected);
+    try testing.expect(evs[1] == .Connected);
+
+    std.debug.print("\n  PASS: transport loopback: connect handshake\n", .{});
+}
+
+test "transport loopback: server sendOnChannel reaches client" {
+    var pair: LoopbackSocket.Pair = .{};
+
+    var srv = try TSrv.initWithSocket(testing.allocator, transportServerCfg(), pair.serverSocket(srv_addr));
+    defer srv.deinit();
+
+    var cli = try TCli.initWithSocket(loopbackClientCfg(), pair.clientSocket(cli_addr));
+    defer cli.deinit();
+
+    try cli.connect();
+    const evs = try handshake(&srv, &cli, 20);
+    const cid = evs[0].ClientConnected.cid;
+
+    // Send on channel 0 (Unreliable)
+    try srv.sendOnChannel(cid, 0, "ping");
+    srv.tick();
+    cli.tick();
+
+    const msg = cli.pollMessage();
+    try testing.expect(msg != null);
+    try testing.expectEqual(@as(u8, 0), msg.?.channel_id);
+    // msg.len == max_user_data (protocol doesn't encode payload length in body)
+    try testing.expectEqualStrings("ping", msg.?.data[0.."ping".len]);
+
+    std.debug.print("\n  PASS: transport loopback: server sendOnChannel reaches client\n", .{});
+}
+
+test "transport loopback: client sendOnChannel reaches server" {
+    var pair: LoopbackSocket.Pair = .{};
+
+    var srv = try TSrv.initWithSocket(testing.allocator, transportServerCfg(), pair.serverSocket(srv_addr));
+    defer srv.deinit();
+
+    var cli = try TCli.initWithSocket(loopbackClientCfg(), pair.clientSocket(cli_addr));
+    defer cli.deinit();
+
+    try cli.connect();
+    const evs = try handshake(&srv, &cli, 20);
+    const cid = evs[0].ClientConnected.cid;
+    _ = cid;
+
+    // Send on channel 2 (Reliable)
+    try cli.sendOnChannel(2, "hello reliable");
+    cli.tick();
+    srv.tick();
+
+    const msg = srv.pollMessage();
+    try testing.expect(msg != null);
+    try testing.expectEqual(@as(u8, 2), msg.?.channel_id);
+    // msg.len == max_user_data (protocol doesn't encode payload length in body)
+    try testing.expectEqualStrings("hello reliable", msg.?.data[0.."hello reliable".len]);
+
+    std.debug.print("\n  PASS: transport loopback: client sendOnChannel reaches server\n", .{});
+}
+
+test "transport loopback: client disconnect" {
+    var pair: LoopbackSocket.Pair = .{};
+
+    var srv = try TSrv.initWithSocket(testing.allocator, transportServerCfg(), pair.serverSocket(srv_addr));
+    defer srv.deinit();
+
+    var cli = try TCli.initWithSocket(loopbackClientCfg(), pair.clientSocket(cli_addr));
+    defer cli.deinit();
+
+    try cli.connect();
+    _ = try handshake(&srv, &cli, 20);
+
+    cli.disconnect();
+    // Flush disconnect packet to server
+    var i: usize = 0;
+    while (i < 5) : (i += 1) {
+        cli.tick();
+        srv.tick();
+        if (srv.pollEvent()) |ev| {
+            try testing.expect(ev == .ClientDisconnected);
+            std.debug.print("\n  PASS: transport loopback: client disconnect\n", .{});
+            return;
+        }
+    }
+    return error.DisconnectNotReceived;
 }
