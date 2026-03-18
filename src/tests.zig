@@ -135,6 +135,46 @@ test "server disconnects client on Disconnect packet" {
 // Server sendPayload → Client
 // ---------------------------------------------------------------------------
 
+test "server disconnects idle client on timeout" {
+    const timeout_ns = 1 * std.time.ns_per_ms;
+    var srv = try Srv.init(
+        testing.allocator,
+        zenet.ServerConfig.init(1, 5000, timeout_ns, &.{}, false, [_]u8{0} ** 32, null),
+    );
+    defer srv.deinit();
+
+    var cli = try Cli.init(clientCfg(9006));
+
+    const client_addr = testAddr(50006);
+    const now = try std.time.Instant.now();
+    srv.update(now);
+    cli.update(now);
+
+    try cli.connect();
+    try relayClientToServer(&cli, &srv, client_addr);
+    try relayServerToClient(&srv, &cli);
+    try relayClientToServer(&cli, &srv, client_addr);
+    try relayServerToClient(&srv, &cli);
+    _ = cli.pollEvent(); // Connected
+
+    const connected = srv.pollEvent().?;
+    try testing.expect(connected == .ClientConnected);
+    const cid = connected.ClientConnected.cid;
+    const slot: usize = @intCast(cid);
+
+    std.Thread.sleep(timeout_ns + (1 * std.time.ns_per_ms));
+    srv.update(try std.time.Instant.now());
+
+    const disconnected = srv.pollEvent().?;
+    try testing.expect(disconnected == .ClientDisconnected);
+    try testing.expectEqual(cid, disconnected.ClientDisconnected.cid);
+    try testing.expect(srv.clients[slot] == null);
+    try testing.expectEqual(@as(usize, 0), srv.addr_to_slot.count());
+    try testing.expectError(error.UnknownClient, srv.sendPayload(cid, "late"));
+
+    std.debug.print("\n  PASS: server disconnects idle client on timeout\n", .{});
+}
+
 test "server sendPayload reaches client as PayloadReceived" {
     var srv = try Srv.init(testing.allocator, serverCfg());
     defer srv.deinit();

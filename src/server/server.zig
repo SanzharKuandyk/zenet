@@ -119,6 +119,16 @@ pub fn Server(comptime opts: Options) type {
                     self.pending.swapRemoveAt(i);
                 }
             }
+
+            i = self.clients.len;
+            while (i > 0) {
+                i -= 1;
+
+                const conn = self.clients[i] orelse continue;
+                if (t -| conn.last_recv <= self.config.client_timeout_ns) continue;
+
+                self.disconnectClient(i) catch {};
+            }
         }
 
         pub fn sendPayload(self: *Self, cid: u64, body: []const u8) ServerError!void {
@@ -279,16 +289,27 @@ pub fn Server(comptime opts: Options) type {
                 .Disconnect => {
                     const key = AddressKey.fromAddress(addr);
                     const slot = self.addr_to_slot.get(key) orelse return error.UnknownClient;
-                    const conn = self.clients[slot].?;
-                    self.clients[slot] = null;
-                    _ = self.addr_to_slot.swapRemove(key);
-                    _ = self.recycled_slots.pushBack(conn.cid);
-                    if (!self.events.pushBack(.{
-                        .ClientDisconnected = .{ .cid = conn.cid, .addr = addr },
-                    })) return error.IoError;
+                    try self.disconnectClient(slot);
                 },
                 .Challenge, .ConnectionAccepted => return error.InvalidPacket,
             }
+        }
+
+        fn disconnectClient(self: *Self, slot: usize) ServerError!void {
+            const conn = self.clients[slot] orelse return error.UnknownClient;
+
+            if (!self.recycled_slots.pushBack(conn.cid)) return error.IoError;
+            errdefer _ = self.recycled_slots.popFront();
+
+            if (!self.events.pushBack(.{
+                .ClientDisconnected = .{
+                    .cid = conn.cid,
+                    .addr = conn.addr,
+                },
+            })) return error.IoError;
+
+            self.clients[slot] = null;
+            _ = self.addr_to_slot.swapRemove(AddressKey.fromAddress(conn.addr));
         }
     };
 }
