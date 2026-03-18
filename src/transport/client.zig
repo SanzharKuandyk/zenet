@@ -64,6 +64,7 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
 
         cli: Cli,
         socket: Socket,
+        // State is split by channel kind so each channel only keeps what it uses.
         ordered_state: [OrderedCount]OrderedChannelState,
         unordered_state: [UnorderedCount]UnorderedChannelState,
         ul_state: [UlCount]UlChannelState,
@@ -147,69 +148,30 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
             const kind = opts.channels[ch_idx];
 
             if (hdr.is_ack) {
-                switch (kind) {
-                    .ReliableOrdered => {
-                        if (OrderedCount == 0) return;
-                        const idx = OrderedMap[ch_idx] orelse return;
-                        self.ordered_state[idx].send.ack(hdr.seq);
-                    },
-                    .ReliableUnordered => {
-                        if (UnorderedCount == 0) return;
-                        const idx = UnorderedMap[ch_idx] orelse return;
-                        self.unordered_state[idx].send.ack(hdr.seq);
-                    },
-                    else => {},
-                }
+                self.handleAck(ch_idx, kind, hdr.seq);
                 return;
             }
 
             switch (kind) {
                 .Unreliable => {},
-                .UnreliableLatest => {
-                    if (UlCount == 0) return;
-                    const idx = UlMap[ch_idx] orelse return;
-                    if (!self.ul_state[idx].recv.accept(hdr.seq)) return;
-                },
-                .ReliableOrdered => {
-                    if (OrderedCount == 0) return;
-                    const idx = OrderedMap[ch_idx] orelse return;
-                    const action = self.ordered_state[idx].recv.classify(hdr.seq);
-                    if (action == .future) return;
-
-                    self.sendAck(@intCast(ch_idx), hdr.seq);
-                    if (action == .duplicate) return;
-                },
-                .ReliableUnordered => {
-                    if (UnorderedCount == 0) return;
-                    const idx = UnorderedMap[ch_idx] orelse return;
-                    const action = self.unordered_state[idx].recv.classify(hdr.seq);
-                    if (action != .stale) self.sendAck(@intCast(ch_idx), hdr.seq);
-                    if (action != .deliver) return;
-                },
+                .UnreliableLatest => if (!self.acceptLatest(ch_idx, hdr.seq)) return,
+                .ReliableOrdered => if (!self.acceptReliableOrdered(ch_idx, hdr.seq)) return,
+                .ReliableUnordered => if (!self.acceptReliableUnordered(ch_idx, hdr.seq)) return,
             }
 
-            const data_len = body.len -| channel_mod.HEADER_SIZE;
-            var msg: Message = .{
-                .channel_id = @intCast(ch_idx),
-                .data = [_]u8{0} ** max_user_data,
-                .len = @min(data_len, max_user_data),
-            };
-            @memcpy(msg.data[0..msg.len], body[channel_mod.HEADER_SIZE .. channel_mod.HEADER_SIZE + msg.len]);
-            _ = self.messages.pushBack(msg);
+            self.enqueueMessage(@intCast(ch_idx), body);
         }
 
         fn retransmitReliable(self: *Self, now_ns: u64) void {
             for (0..channel_count) |ch_idx| {
                 switch (opts.channels[ch_idx]) {
                     .ReliableOrdered => {
-                        if (OrderedCount == 0) continue;
-                        const idx = OrderedMap[ch_idx] orelse continue;
-                        self.retransmitState(&self.ordered_state[idx].send, @intCast(ch_idx), now_ns);
+                        const send = self.orderedSendState(@intCast(ch_idx)) orelse continue;
+                        self.retransmitState(send, @intCast(ch_idx), now_ns);
                     },
                     .ReliableUnordered => {
-                        if (UnorderedCount == 0) continue;
-                        const idx = UnorderedMap[ch_idx] orelse continue;
-                        self.retransmitState(&self.unordered_state[idx].send, @intCast(ch_idx), now_ns);
+                        const send = self.unorderedSendState(@intCast(ch_idx)) orelse continue;
+                        self.retransmitState(send, @intCast(ch_idx), now_ns);
                     },
                     else => {},
                 }
@@ -232,38 +194,35 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
 
         pub fn sendOnChannel(self: *Self, channel_id: u8, data: []const u8) !void {
             if (channel_id >= channel_count) return error.InvalidChannel;
-            const kind = opts.channels[channel_id];
             const now_ns = self.cli.getCurrentTime();
 
             var body: [opts.max_payload_size]u8 = [_]u8{0} ** opts.max_payload_size;
             const data_len = @min(data.len, max_user_data);
             const body_len = channel_mod.HEADER_SIZE + data_len;
 
-            switch (kind) {
+            switch (opts.channels[channel_id]) {
                 .Unreliable => {
                     channel_mod.encodeHeader(body[0..channel_mod.HEADER_SIZE], channel_id, 0);
                 },
                 .UnreliableLatest => {
-                    if (UlCount == 0) return error.InvalidChannel;
-                    const idx = UlMap[channel_id] orelse return error.InvalidChannel;
-                    self.ul_state[idx].send_seq +%= 1;
+                    const idx = self.ulIndex(channel_id) orelse return error.InvalidChannel;
+                    const st = &self.ul_state[idx];
+                    st.send_seq +%= 1;
                     channel_mod.encodeHeader(
                         body[0..channel_mod.HEADER_SIZE],
                         channel_id,
-                        self.ul_state[idx].send_seq,
+                        st.send_seq,
                     );
                 },
                 .ReliableOrdered => {
-                    if (OrderedCount == 0) return error.InvalidChannel;
-                    const idx = OrderedMap[channel_id] orelse return error.InvalidChannel;
-                    const seq = self.ordered_state[idx].send.push(data[0..data_len], now_ns) orelse
+                    const send = self.orderedSendState(channel_id) orelse return error.InvalidChannel;
+                    const seq = send.push(data[0..data_len], now_ns) orelse
                         return error.ReliableBufferFull;
                     channel_mod.encodeHeader(body[0..channel_mod.HEADER_SIZE], channel_id, seq);
                 },
                 .ReliableUnordered => {
-                    if (UnorderedCount == 0) return error.InvalidChannel;
-                    const idx = UnorderedMap[channel_id] orelse return error.InvalidChannel;
-                    const seq = self.unordered_state[idx].send.push(data[0..data_len], now_ns) orelse
+                    const send = self.unorderedSendState(channel_id) orelse return error.InvalidChannel;
+                    const seq = send.push(data[0..data_len], now_ns) orelse
                         return error.ReliableBufferFull;
                     channel_mod.encodeHeader(body[0..channel_mod.HEADER_SIZE], channel_id, seq);
                 },
@@ -310,6 +269,103 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
             channel_mod.encodeAck(&ack_body, channel_id, seq);
             self.cli.sendPayload(&ack_body) catch {};
             self.flushOutgoing();
+        }
+
+        fn handleAck(self: *Self, channel_id: u8, kind: channel_mod.ChannelKind, seq: u16) void {
+            switch (kind) {
+                .ReliableOrdered => {
+                    const send = self.orderedSendState(channel_id) orelse return;
+                    send.ack(seq);
+                },
+                .ReliableUnordered => {
+                    const send = self.unorderedSendState(channel_id) orelse return;
+                    send.ack(seq);
+                },
+                else => {},
+            }
+        }
+
+        fn acceptLatest(self: *Self, channel_id: u8, seq: u16) bool {
+            const recv = self.ulRecvState(channel_id) orelse return false;
+            return recv.accept(seq);
+        }
+
+        fn acceptReliableOrdered(self: *Self, channel_id: u8, seq: u16) bool {
+            const recv = self.orderedRecvState(channel_id) orelse return false;
+            const action = recv.classify(seq);
+            if (action == .future) return false;
+
+            self.sendAck(channel_id, seq);
+            return action == .deliver;
+        }
+
+        fn acceptReliableUnordered(self: *Self, channel_id: u8, seq: u16) bool {
+            const recv = self.unorderedRecvStatePtr(channel_id) orelse return false;
+            const action = recv.classify(seq);
+            if (action != .stale) self.sendAck(channel_id, seq);
+            return action == .deliver;
+        }
+
+        fn enqueueMessage(self: *Self, channel_id: u8, body: []const u8) void {
+            const data_len = body.len -| channel_mod.HEADER_SIZE;
+            var msg: Message = .{
+                .channel_id = channel_id,
+                .data = [_]u8{0} ** max_user_data,
+                .len = @min(data_len, max_user_data),
+            };
+            @memcpy(msg.data[0..msg.len], body[channel_mod.HEADER_SIZE .. channel_mod.HEADER_SIZE + msg.len]);
+            _ = self.messages.pushBack(msg);
+        }
+
+        fn orderedIndex(self: *const Self, channel_id: u8) ?usize {
+            _ = self;
+            if (OrderedCount == 0) return null;
+            const idx = OrderedMap[channel_id] orelse return null;
+            return idx;
+        }
+
+        fn unorderedIndex(self: *const Self, channel_id: u8) ?usize {
+            _ = self;
+            if (UnorderedCount == 0) return null;
+            const idx = UnorderedMap[channel_id] orelse return null;
+            return idx;
+        }
+
+        fn ulIndex(self: *const Self, channel_id: u8) ?usize {
+            _ = self;
+            if (UlCount == 0) return null;
+            const idx = UlMap[channel_id] orelse return null;
+            return idx;
+        }
+
+        fn orderedSendState(self: *Self, channel_id: u8) ?*RelState {
+            const idx = self.orderedIndex(channel_id) orelse return null;
+            if (OrderedCount == 0) return null;
+            return &self.ordered_state[idx].send;
+        }
+
+        fn unorderedSendState(self: *Self, channel_id: u8) ?*RelState {
+            const idx = self.unorderedIndex(channel_id) orelse return null;
+            if (UnorderedCount == 0) return null;
+            return &self.unordered_state[idx].send;
+        }
+
+        fn orderedRecvState(self: *Self, channel_id: u8) ?*channel_mod.ReliableOrderedRecvState {
+            const idx = self.orderedIndex(channel_id) orelse return null;
+            if (OrderedCount == 0) return null;
+            return &self.ordered_state[idx].recv;
+        }
+
+        fn unorderedRecvStatePtr(self: *Self, channel_id: u8) ?*UnorderedRecvState {
+            const idx = self.unorderedIndex(channel_id) orelse return null;
+            if (UnorderedCount == 0) return null;
+            return &self.unordered_state[idx].recv;
+        }
+
+        fn ulRecvState(self: *Self, channel_id: u8) ?*channel_mod.UnreliableLatestState {
+            const idx = self.ulIndex(channel_id) orelse return null;
+            if (UlCount == 0) return null;
+            return &self.ul_state[idx].recv;
         }
 
         fn resetChannelState(self: *Self) void {
