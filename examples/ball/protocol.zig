@@ -9,7 +9,7 @@ pub const net_opts: zenet.Options = .{
     .user_data_size = 0,
     // Two logical channels with independent delivery guarantees:
     .channels = &.{
-        .Reliable,   // ch 0 — ball positions and session events (assign, remove)
+        .ReliableOrdered, // ch 0 — ball positions and session events (assign, remove)
         .Unreliable, // ch 1 — chat: fire-and-forget, lowest overhead
     },
     // Max unACKed reliable messages in-flight per channel per peer.

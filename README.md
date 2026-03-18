@@ -16,7 +16,7 @@ Two worked examples are included under `examples/`. Each has a headless server a
 
 ### Ball
 
-Up to 4 clients move colored balls around a shared window. Demonstrates two channels: Reliable for position updates and session events, Unreliable for chat.
+Up to 4 clients move colored balls around a shared window. Demonstrates `ReliableOrdered` for position updates and session events, and `Unreliable` for chat.
 
 ![Ball example](examples/ball/balls.gif)
 
@@ -30,7 +30,7 @@ Controls: `WASD` to move · `T` to chat · `Esc` to cancel chat
 
 ### Pong
 
-Two-player networked pong. Demonstrates three channels: Reliable for ball state, Reliable for paddle input, Unreliable for chat.
+Two-player networked pong. Demonstrates `ReliableOrdered` for ball state and paddle input, and `Unreliable` for chat.
 
 ```sh
 zig build pong-server          # terminal 1
@@ -66,7 +66,7 @@ const std   = @import("std");
 const opts: zenet.Options = .{
     .max_clients     = 64,
     .max_payload_size = 512,
-    .channels        = &.{ .Unreliable, .UnreliableLatest, .Reliable },
+    .channels        = &.{ .Unreliable, .UnreliableLatest, .ReliableOrdered, .ReliableUnordered },
 };
 
 // --- server ---
@@ -129,7 +129,7 @@ while (running) {
         cli.consumeMessage();
     }
 
-    // send on channel 2 (Reliable)
+    // send on channel 2 (ReliableOrdered)
     try cli.sendOnChannel(2, "hello");
 }
 ```
@@ -151,7 +151,7 @@ const opts: zenet.Options = .{
     .user_data_size       = 256,   // bytes carried in ConnectToken.user_data
 
     // Channels  (index = channel_id passed to sendOnChannel)
-    .channels             = &.{ .Unreliable, .UnreliableLatest, .Reliable },
+    .channels             = &.{ .Unreliable, .UnreliableLatest, .ReliableOrdered, .ReliableUnordered },
 
     // Reliable channel tuning
     .reliable_buffer      = 64,    // unACKed send slots per channel per peer
@@ -173,29 +173,32 @@ const opts: zenet.Options = .{
 ## Channels
 
 Every message is sent on a numbered channel (index into `opts.channels`).
-Three kinds are available:
+Four kinds are available:
 
-| Kind              | Delivery              | Ordering | Use for                       |
-|-------------------|-----------------------|----------|-------------------------------|
-| `Unreliable`      | fire-and-forget       | none     | audio, debug overlays         |
-| `UnreliableLatest`| fire-and-forget       | drops older | positions, orientations    |
-| `Reliable`        | ACK + retransmit      | arrival  | game events, chat             |
+| Kind                 | Delivery         | Ordering | Use for                            |
+|----------------------|------------------|----------|------------------------------------|
+| `Unreliable`         | fire-and-forget  | none     | audio, debug overlays              |
+| `UnreliableLatest`   | fire-and-forget  | drops older | positions, orientations         |
+| `ReliableOrdered`    | ACK + retransmit | in order | game events, match flow            |
+| `ReliableUnordered`  | ACK + retransmit | none     | idempotent reliable notifications  |
 
 ```zig
-// opts.channels = &.{ .Unreliable, .UnreliableLatest, .Reliable }
-//                         0               1                2
+// opts.channels = &.{ .Unreliable, .UnreliableLatest, .ReliableOrdered, .ReliableUnordered }
+//                         0               1                 2                   3
 
 // send from client
 try cli.sendOnChannel(0, "fire-and-forget");
 try cli.sendOnChannel(1, &std.mem.toBytes(player_position));
 try cli.sendOnChannel(2, "must arrive");
+try cli.sendOnChannel(3, "must arrive, order does not matter");
 
 // receive on server
 while (srv.peekMessage()) |msg| {
     switch (msg.channel_id) {
         0 => ..., // Unreliable
         1 => ..., // UnreliableLatest — older packets already dropped
-        2 => ..., // Reliable
+        2 => ..., // ReliableOrdered
+        3 => ..., // ReliableUnordered
         else => {},
     }
     srv.consumeMessage();
@@ -555,8 +558,8 @@ objects, because the sockets hold interior pointers into it.
 src/
   root.zig              public API re-exports and Options
   packet.zig            wire-format serialization/deserialization
-  channel.zig           channel header encoding, UnreliableLatest state,
-                        ReliableState send buffer
+  channel.zig           channel header encoding, channel kind helpers,
+                        reliable send/receive state
   handshake.zig         HMAC challenge tokens, DefaultConnectToken,
                         validateConnectTokenInterface
   addr.zig              address normalization for hash-map keys

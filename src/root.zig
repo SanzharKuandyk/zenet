@@ -27,7 +27,7 @@ pub const Options = struct {
     /// Channel configuration for TransportServer/TransportClient.
     /// Index = channel_id. At least one channel required.
     channels: []const ChannelKind = &.{.Unreliable},
-    /// How many unACKed messages each reliable channel can buffer per peer.
+    /// How many unACKed messages each reliable ordered/unordered channel can buffer per peer.
     reliable_buffer: usize = 64,
     /// Nanoseconds before an unACKed reliable message is resent.
     reliable_resend_ns: u64 = 100 * std.time.ns_per_ms,

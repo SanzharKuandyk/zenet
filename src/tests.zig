@@ -23,7 +23,7 @@ const opts: zenet.Options = .{
     .events_queue_size = 32,
     .user_data_size = 16,
     .max_payload_size = 64,
-    .channels = &.{ .Unreliable, .UnreliableLatest, .Reliable },
+    .channels = &.{ .Unreliable, .UnreliableLatest, .ReliableOrdered, .ReliableUnordered },
     .reliable_buffer = 8,
     .reliable_resend_ns = 100 * std.time.ns_per_ms,
 };
@@ -476,7 +476,7 @@ test "transport loopback: client sendOnChannel reaches server" {
     const cid = evs[0].ClientConnected.cid;
     _ = cid;
 
-    // Send on channel 2 (Reliable)
+    // Send on channel 2 (ReliableOrdered)
     try cli.sendOnChannel(2, "hello reliable");
     cli.tick();
     srv.tick();
@@ -488,6 +488,30 @@ test "transport loopback: client sendOnChannel reaches server" {
     try testing.expectEqualStrings("hello reliable", msg.?.data[0.."hello reliable".len]);
 
     std.debug.print("\n  PASS: transport loopback: client sendOnChannel reaches server\n", .{});
+}
+
+test "transport loopback: ReliableUnordered reaches server" {
+    var pair: LoopbackSocket.Pair = .{};
+
+    var srv = try TSrv.initWithSocket(testing.allocator, transportServerCfg(), pair.serverSocket(srv_addr));
+    defer srv.deinit();
+
+    var cli = try TCli.initWithSocket(loopbackClientCfg(), pair.clientSocket(cli_addr));
+    defer cli.deinit();
+
+    try cli.connect();
+    _ = try handshake(&srv, &cli, 20);
+
+    try cli.sendOnChannel(3, "hello unordered");
+    cli.tick();
+    srv.tick();
+
+    const msg = srv.pollMessage();
+    try testing.expect(msg != null);
+    try testing.expectEqual(@as(u8, 3), msg.?.channel_id);
+    try testing.expectEqualStrings("hello unordered", msg.?.data[0.."hello unordered".len]);
+
+    std.debug.print("\n  PASS: transport loopback: ReliableUnordered reaches server\n", .{});
 }
 
 test "transport loopback: peekMessage/consumeMessage zero-copy" {

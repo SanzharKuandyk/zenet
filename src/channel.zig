@@ -1,13 +1,40 @@
 const std = @import("std");
 const testing = std.testing;
 
-pub const ChannelKind = enum { Unreliable, UnreliableLatest, Reliable };
+pub const ChannelKind = enum {
+    Unreliable,
+    UnreliableLatest,
+    ReliableOrdered,
+    ReliableUnordered,
+};
 
 /// Bytes consumed from payload body by the channel framing layer.
 pub const HEADER_SIZE: usize = 3; // channel_id(1) + seq(2)
 
 /// High bit of channel_id byte signals an ACK-only packet.
 pub const ACK_FLAG: u8 = 0x80;
+
+pub fn countChannels(comptime channels: []const ChannelKind, comptime wanted: ChannelKind) usize {
+    var count: usize = 0;
+    for (channels) |kind| {
+        if (kind == wanted) count += 1;
+    }
+    return count;
+}
+
+pub fn makeChannelIndexMap(comptime channels: []const ChannelKind, comptime wanted: ChannelKind) [channels.len]?u8 {
+    var map = [_]?u8{null} ** channels.len;
+    var idx: u8 = 0;
+
+    for (channels, 0..) |kind, ch_idx| {
+        if (kind == wanted) {
+            map[ch_idx] = idx;
+            idx += 1;
+        }
+    }
+
+    return map;
+}
 
 pub fn encodeHeader(buf: *[HEADER_SIZE]u8, channel_id: u8, seq: u16) void {
     buf[0] = channel_id & ~ACK_FLAG;
@@ -111,16 +138,16 @@ pub fn ReliableState(comptime buf_size: usize, comptime data_cap: usize) type {
     };
 }
 
-pub const ReliableRecvAction = enum {
+pub const ReliableOrderedRecvAction = enum {
     deliver,
     duplicate,
     future,
 };
 
-pub const ReliableRecvState = struct {
+pub const ReliableOrderedRecvState = struct {
     next_seq: u16 = 1,
 
-    pub fn classify(self: *ReliableRecvState, seq: u16) ReliableRecvAction {
+    pub fn classify(self: *ReliableOrderedRecvState, seq: u16) ReliableOrderedRecvAction {
         if (seq == self.next_seq) {
             self.next_seq +%= 1;
             return .deliver;
@@ -129,6 +156,54 @@ pub const ReliableRecvState = struct {
         return .duplicate;
     }
 };
+
+pub const ReliableUnorderedRecvAction = enum {
+    deliver,
+    duplicate,
+    stale,
+};
+
+pub fn ReliableUnorderedRecvState(comptime window_size: usize) type {
+    comptime {
+        if (window_size == 0)
+            @compileError("ReliableUnorderedRecvState window_size must be greater than zero");
+    }
+
+    return struct {
+        const Self = @This();
+
+        initialized: bool = false,
+        newest_seq: u16 = 0,
+        seen: [window_size]?u16 = [_]?u16{null} ** window_size,
+
+        pub fn classify(self: *Self, seq: u16) ReliableUnorderedRecvAction {
+            if (!self.initialized) {
+                self.initialized = true;
+                self.newest_seq = seq;
+                self.seen[indexFor(seq)] = seq;
+                return .deliver;
+            }
+
+            if (!seqGreater(seq, self.newest_seq)) {
+                const behind = self.newest_seq -% seq;
+                if (behind >= window_size) return .stale;
+            }
+
+            const idx = indexFor(seq);
+            if (self.seen[idx]) |seen_seq| {
+                if (seen_seq == seq) return .duplicate;
+            }
+
+            self.seen[idx] = seq;
+            if (seqGreater(seq, self.newest_seq)) self.newest_seq = seq;
+            return .deliver;
+        }
+
+        fn indexFor(seq: u16) usize {
+            return @as(usize, seq) % window_size;
+        }
+    };
+}
 
 /// Sequence comparison with 16-bit wrapping (half-space rule).
 /// Returns true if `a` is strictly after `b` in sequence space.
@@ -239,4 +314,30 @@ test "ReliableState buffer full" {
     _ = state.push(&data, 0).?;
     try testing.expect(state.push(&data, 0) == null);
     std.debug.print("\n  PASS: ReliableState buffer full\n", .{});
+}
+
+test "ReliableUnorderedRecvState deduplicates within window" {
+    const S = ReliableUnorderedRecvState(8);
+    var state: S = .{};
+
+    try testing.expectEqual(ReliableUnorderedRecvAction.deliver, state.classify(10));
+    try testing.expectEqual(ReliableUnorderedRecvAction.deliver, state.classify(12));
+    try testing.expectEqual(ReliableUnorderedRecvAction.deliver, state.classify(11));
+    try testing.expectEqual(ReliableUnorderedRecvAction.duplicate, state.classify(12));
+
+    std.debug.print("\n  PASS: ReliableUnorderedRecvState deduplicates within window\n", .{});
+}
+
+test "ReliableUnorderedRecvState drops stale packets outside window" {
+    const S = ReliableUnorderedRecvState(4);
+    var state: S = .{};
+
+    try testing.expectEqual(ReliableUnorderedRecvAction.deliver, state.classify(10));
+    try testing.expectEqual(ReliableUnorderedRecvAction.deliver, state.classify(11));
+    try testing.expectEqual(ReliableUnorderedRecvAction.deliver, state.classify(12));
+    try testing.expectEqual(ReliableUnorderedRecvAction.deliver, state.classify(13));
+    try testing.expectEqual(ReliableUnorderedRecvAction.deliver, state.classify(14));
+    try testing.expectEqual(ReliableUnorderedRecvAction.stale, state.classify(10));
+
+    std.debug.print("\n  PASS: ReliableUnorderedRecvState drops stale packets outside window\n", .{});
 }

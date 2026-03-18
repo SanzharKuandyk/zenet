@@ -11,8 +11,8 @@ pub const net_opts: zenet.Options = .{
     // Each entry in `channels` is one logical stream with its own delivery guarantee.
     // The index becomes the channel_id passed to sendOnChannel / visible in Message.channel_id.
     .channels = &.{
-        .Reliable,   // ch 0 — ball state (server → clients): must arrive, retransmitted until ACKed
-        .Reliable,   // ch 1 — actions/events (bidirectional): slot assignment, input, game-over
+        .ReliableOrdered, // ch 0 — ball state (server → clients): must arrive, retransmitted until ACKed
+        .ReliableOrdered, // ch 1 — actions/events (bidirectional): slot assignment, input, game-over
         .Unreliable, // ch 2 — chat: fire-and-forget, no retransmit, no ordering guarantee
     },
     // How many unACKed reliable messages can be in-flight per channel per peer before
