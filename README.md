@@ -12,7 +12,7 @@ unreliable UDP. Inspired by [renet](https://github.com/lucaspoffo/renet).
 
 ## Examples
 
-Two worked examples are included under `examples/`. Each has a headless server and a graphical client built with [raylib-zig](https://github.com/raylib-zig/raylib-zig).
+Two worked examples are included under `examples/`. They are built from the separate examples package so the root library package stays free of GUI/example dependencies.
 
 ### Ball
 
@@ -21,9 +21,9 @@ Up to 4 clients move colored balls around a shared window. Demonstrates `Reliabl
 ![Ball example](examples/ball/balls.gif)
 
 ```sh
-zig build ball-server          # terminal 1
-zig build ball-client          # terminal 2 (repeat for more clients)
-zig build ball-client -- 1.2.3.4   # connect to a remote server
+zig build --build-file examples/build.zig ball-server          # terminal 1
+zig build --build-file examples/build.zig ball-client          # terminal 2
+zig build --build-file examples/build.zig ball-client -- 1.2.3.4
 ```
 
 Controls: `WASD` to move · `T` to chat · `Esc` to cancel chat
@@ -33,10 +33,10 @@ Controls: `WASD` to move · `T` to chat · `Esc` to cancel chat
 Two-player networked pong. Demonstrates `UnreliableLatest` for ball/paddle state and player input, `ReliableOrdered` for control events, and `Unreliable` for chat.
 
 ```sh
-zig build pong-server          # terminal 1
-zig build pong-client          # terminal 2
-zig build pong-client          # terminal 3
-zig build pong-client -- 1.2.3.4   # connect to a remote server
+zig build --build-file examples/build.zig pong-server          # terminal 1
+zig build --build-file examples/build.zig pong-client          # terminal 2
+zig build --build-file examples/build.zig pong-client          # terminal 3
+zig build --build-file examples/build.zig pong-client -- 1.2.3.4
 ```
 
 Controls: `W`/`S` to move · `T` to chat · `Space` to ready up after a round
