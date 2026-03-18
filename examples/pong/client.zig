@@ -114,10 +114,8 @@ pub fn main() !void {
 
                 var buf: [proto.PLAYER_INPUT_SIZE]u8 = undefined;
                 proto.encodePlayerInput(&buf, dir);
-                // sendOnChannel(channel_id, data): CH_ACTION is Reliable, so the
-                // message is buffered and retransmitted until the server ACKs it.
-                // This also serves as the per-frame heartbeat the server tracks.
-                cli.sendOnChannel(proto.CH_ACTION, &buf) catch {};
+                // CH_INPUT is UnreliableLatest: only the newest direction matters.
+                cli.sendOnChannel(proto.CH_INPUT, &buf) catch {};
             }
 
             if (game.winner != null and !game.ready_sent and rl.isKeyPressed(.space)) {
@@ -168,12 +166,15 @@ fn handleMessage(msg: *const Cli.Message) void {
                 game.score = .{ bs.score_left, bs.score_right };
             }
         },
-        proto.CH_ACTION => switch (data[0]) {
+        proto.CH_PADDLE => switch (data[0]) {
             proto.TAG_PADDLE_STATE => {
                 const slot = proto.decodePaddleSlot(data) orelse return;
                 const y = proto.decodePaddleY(data) orelse return;
                 if (slot < 2) game.paddles[slot] = y;
             },
+            else => {},
+        },
+        proto.CH_ACTION => switch (data[0]) {
             proto.TAG_ASSIGN_SLOT => {
                 const slot = proto.decodeAssignSlot(data) orelse return;
                 game.slot = slot;

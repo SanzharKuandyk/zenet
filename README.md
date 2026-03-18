@@ -16,7 +16,7 @@ Two worked examples are included under `examples/`. Each has a headless server a
 
 ### Ball
 
-Up to 4 clients move colored balls around a shared window. Demonstrates `ReliableOrdered` for position updates and session events, and `Unreliable` for chat.
+Up to 4 clients move colored balls around a shared window. Demonstrates `ReliableOrdered` for session events, `UnreliableLatest` for ball positions, and `Unreliable` for chat.
 
 ![Ball example](examples/ball/balls.gif)
 
@@ -30,7 +30,7 @@ Controls: `WASD` to move · `T` to chat · `Esc` to cancel chat
 
 ### Pong
 
-Two-player networked pong. Demonstrates `ReliableOrdered` for ball state and paddle input, and `Unreliable` for chat.
+Two-player networked pong. Demonstrates `UnreliableLatest` for ball/paddle state and player input, `ReliableOrdered` for control events, and `Unreliable` for chat.
 
 ```sh
 zig build pong-server          # terminal 1

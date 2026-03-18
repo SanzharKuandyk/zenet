@@ -89,9 +89,6 @@ pub fn main() !void {
                             p.* = .{ .cid = e.cid, .last_heartbeat_ms = now_ms };
                             var buf: [proto.ASSIGN_SLOT_SIZE]u8 = undefined;
                             proto.encodeAssignSlot(&buf, @intCast(i));
-                            // sendOnChannel(cid, channel_id, data) — enqueues a payload
-                            // to be sent on the next tick. Reliable channels buffer it
-                            // until the client ACKs receipt.
                             srv.sendOnChannel(e.cid, proto.CH_ACTION, &buf) catch {};
                             std.debug.print("  Assigned slot {d}\n", .{i});
                             break;
@@ -124,16 +121,6 @@ pub fn main() !void {
                         continue;
                     }
                     switch (data[0]) {
-                        proto.TAG_PLAYER_INPUT => {
-                            if (proto.decodePlayerInput(data)) |dir| {
-                                for (&players) |*p| {
-                                    if (p.cid == msg.cid) {
-                                        p.dir = dir;
-                                        p.last_heartbeat_ms = now_ms;
-                                    }
-                                }
-                            }
-                        },
                         proto.TAG_READY => {
                             if (game_over) {
                                 for (&players) |*p| {
@@ -143,6 +130,25 @@ pub fn main() !void {
                                     players[1].cid != null and players[1].ready)
                                 {
                                     startNewGame(&srv);
+                                }
+                            }
+                        },
+                        else => {},
+                    }
+                },
+                proto.CH_INPUT => {
+                    if (data.len == 0) {
+                        srv.consumeMessage();
+                        continue;
+                    }
+                    switch (data[0]) {
+                        proto.TAG_PLAYER_INPUT => {
+                            if (proto.decodePlayerInput(data)) |dir| {
+                                for (&players) |*p| {
+                                    if (p.cid == msg.cid) {
+                                        p.dir = dir;
+                                        p.last_heartbeat_ms = now_ms;
+                                    }
                                 }
                             }
                         },
@@ -235,7 +241,7 @@ pub fn main() !void {
                 var pad_buf: [proto.PADDLE_STATE_SIZE]u8 = undefined;
                 proto.encodePaddleState(&pad_buf, @intCast(i), p.y);
                 for (players) |p2| {
-                    if (p2.cid) |cid| srv.sendOnChannel(cid, proto.CH_ACTION, &pad_buf) catch {};
+                    if (p2.cid) |cid| srv.sendOnChannel(cid, proto.CH_PADDLE, &pad_buf) catch {};
                 }
             }
         }

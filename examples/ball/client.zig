@@ -126,7 +126,7 @@ fn handleMessage(msg: *const Cli.Message) void {
     const data = msg.data[0..msg.len];
     if (data.len == 0) return;
     switch (msg.channel_id) {
-        proto.CH_BALL => switch (data[0]) {
+        proto.CH_SESSION => switch (data[0]) {
             proto.TAG_ASSIGN => {
                 if (proto.decodeAssign(data)) |id| {
                     my_id = id;
@@ -153,6 +153,18 @@ fn handleMessage(msg: *const Cli.Message) void {
             },
             else => {},
         },
+        proto.CH_BALL => switch (data[0]) {
+            proto.TAG_BALL => {
+                if (proto.decodeBall(data)) |b| {
+                    if (b.id < balls.len) {
+                        balls[b.id].active = true;
+                        balls[b.id].x = b.x;
+                        balls[b.id].y = b.y;
+                    }
+                }
+            },
+            else => {},
+        },
         proto.CH_CHAT => {
             if (proto.decodeChat(data)) |text| appendChat(text);
         },
@@ -175,9 +187,7 @@ fn handleMovement(cli: *Cli) void {
 
     var buf: [proto.BALL_SIZE]u8 = undefined;
     proto.encodeBall(&buf, id, b.x, b.y);
-    // sendOnChannel(channel_id, data): CH_BALL is Reliable so position is buffered
-    // until the server ACKs. For production, Unreliable or UnreliableLatest is
-    // preferable for high-frequency position data.
+    // CH_BALL is UnreliableLatest: only the newest position matters.
     cli.sendOnChannel(proto.CH_BALL, &buf) catch {};
 }
 

@@ -11,9 +11,11 @@ pub const net_opts: zenet.Options = .{
     // Each entry in `channels` is one logical stream with its own delivery guarantee.
     // The index becomes the channel_id passed to sendOnChannel / visible in Message.channel_id.
     .channels = &.{
-        .ReliableOrdered, // ch 0 — ball state (server → clients): must arrive, retransmitted until ACKed
-        .ReliableOrdered, // ch 1 — actions/events (bidirectional): slot assignment, input, game-over
-        .Unreliable, // ch 2 — chat: fire-and-forget, no retransmit, no ordering guarantee
+        .UnreliableLatest, // ch 0 — ball state (server → clients)
+        .UnreliableLatest, // ch 1 — paddle state (server → clients)
+        .ReliableOrdered, // ch 2 — actions/events: slot assignment, game-over, new-game
+        .UnreliableLatest, // ch 3 — player input / heartbeat (client → server)
+        .Unreliable, // ch 4 — chat: fire-and-forget, no retransmit, no ordering guarantee
     },
     // How many unACKed reliable messages can be in-flight per channel per peer before
     // sendOnChannel returns error.ReliableBufferFull.
@@ -31,8 +33,10 @@ pub const PROTOCOL_ID: u64 = 0x504F4E47; // "PONG"
 pub const SERVER_PORT: u16 = 9913;
 
 pub const CH_BALL: u8 = 0;
-pub const CH_ACTION: u8 = 1;
-pub const CH_CHAT: u8 = 2;
+pub const CH_PADDLE: u8 = 1;
+pub const CH_ACTION: u8 = 2;
+pub const CH_INPUT: u8 = 3;
+pub const CH_CHAT: u8 = 4;
 
 pub const SCREEN_W: f32 = 800;
 pub const SCREEN_H: f32 = 600;
@@ -49,12 +53,12 @@ pub const MAX_SCORE: u8 = 11;
 // the raw byte slice exposed by peekMessage/pollMessage.
 pub const TAG_BALL_STATE: u8 = 0x01;  // server → clients, ch 0
 pub const TAG_PADDLE_STATE: u8 = 0x10; // server → clients, ch 1
-pub const TAG_PLAYER_INPUT: u8 = 0x20; // client → server, ch 1; also acts as heartbeat
-pub const TAG_ASSIGN_SLOT: u8 = 0x30;  // server → client, ch 1; sent on ClientConnected
-pub const TAG_GAME_OVER: u8 = 0x40;    // server → clients, ch 1
-pub const TAG_READY: u8 = 0x41;        // client → server, ch 1; "I want to play again"
-pub const TAG_NEW_GAME: u8 = 0x42;     // server → clients, ch 1; clears game-over on client
-pub const TAG_CHAT: u8 = 0x50;         // both directions, ch 2
+pub const TAG_PLAYER_INPUT: u8 = 0x20; // client → server, ch 3; also acts as heartbeat
+pub const TAG_ASSIGN_SLOT: u8 = 0x30;  // server → client, ch 2; sent on ClientConnected
+pub const TAG_GAME_OVER: u8 = 0x40;    // server → clients, ch 2
+pub const TAG_READY: u8 = 0x41;        // client → server, ch 2; "I want to play again"
+pub const TAG_NEW_GAME: u8 = 0x42;     // server → clients, ch 2; clears game-over on client
+pub const TAG_CHAT: u8 = 0x50;         // both directions, ch 4
 
 // Floats are encoded as little-endian u32 bit patterns to avoid alignment-cast UB.
 // zenet delivers payloads as []u8 slices with no alignment guarantee, so @ptrCast

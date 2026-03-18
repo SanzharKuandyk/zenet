@@ -7,10 +7,12 @@ pub const net_opts: zenet.Options = .{
     .max_clients = 4,
     .max_payload_size = 256,
     .user_data_size = 0,
-    // Two logical channels with independent delivery guarantees:
+    // Session/control data should be reliable and ordered.
+    // High-frequency position updates should only keep the newest value.
     .channels = &.{
-        .ReliableOrdered, // ch 0 — ball positions and session events (assign, remove)
-        .Unreliable, // ch 1 — chat: fire-and-forget, lowest overhead
+        .ReliableOrdered, // ch 0 — session events (assign, remove)
+        .UnreliableLatest, // ch 1 — ball positions
+        .Unreliable, // ch 2 — chat: fire-and-forget, lowest overhead
     },
     // Max unACKed reliable messages in-flight per channel per peer.
     .reliable_buffer = 64,
@@ -24,8 +26,9 @@ pub const net_opts: zenet.Options = .{
 pub const PROTOCOL_ID: u64 = 0x42414C4C; // "BALL"
 pub const SERVER_PORT: u16 = 9914;
 
-pub const CH_BALL: u8 = 0;
-pub const CH_CHAT: u8 = 1;
+pub const CH_SESSION: u8 = 0;
+pub const CH_BALL: u8 = 1;
+pub const CH_CHAT: u8 = 2;
 
 pub const W: f32 = 960;
 pub const H: f32 = 720;

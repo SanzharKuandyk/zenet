@@ -55,11 +55,9 @@ pub fn main() !void {
                         const id: u8 = @intCast(i);
 
                         // Tell the new client its assigned id.
-                        // sendOnChannel(cid, channel_id, data) — CH_BALL is Reliable,
-                        // so this is buffered and retransmitted until the client ACKs.
                         var assign_buf: [proto.ASSIGN_SIZE]u8 = undefined;
                         proto.encodeAssign(&assign_buf, id);
-                        srv.sendOnChannel(e.cid, proto.CH_BALL, &assign_buf) catch {};
+                        srv.sendOnChannel(e.cid, proto.CH_SESSION, &assign_buf) catch {};
 
                         // Send all existing ball positions to the newly connected client
                         // so it can render peers that are already in the session.
@@ -83,7 +81,7 @@ pub fn main() !void {
                         var rm_buf: [proto.REMOVE_SIZE]u8 = undefined;
                         proto.encodeRemove(&rm_buf, @intCast(i));
                         for (slots) |other| {
-                            if (other.cid) |cid| srv.sendOnChannel(cid, proto.CH_BALL, &rm_buf) catch {};
+                            if (other.cid) |cid| srv.sendOnChannel(cid, proto.CH_SESSION, &rm_buf) catch {};
                         }
 
                         std.debug.print("Disconnected cid={d} (slot {d})\n", .{ e.cid, i });
@@ -99,6 +97,7 @@ pub fn main() !void {
         while (srv.peekMessage()) |msg| {
             const data = msg.data[0..msg.len];
             switch (msg.channel_id) {
+                proto.CH_SESSION => {},
                 proto.CH_BALL => {
                     if (proto.decodeBall(data)) |b| {
                         if (b.id < slots.len) {
