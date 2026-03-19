@@ -1,5 +1,6 @@
 const std = @import("std");
 const root = @import("../root.zig");
+const validation = @import("../validation/root.zig");
 const connection_mod = @import("connection.zig");
 const packet_mod = @import("../packet.zig");
 const handshake = @import("../handshake.zig");
@@ -15,8 +16,9 @@ const SECRET_KEY_SIZE = root.SECRET_KEY_SIZE;
 
 pub fn Server(comptime opts: Options) type {
     comptime {
+        validation.options.validate(opts);
         if (opts.ConnectToken != void)
-            handshake.validateConnectTokenInterface(opts.ConnectToken, opts.user_data_size);
+            validation.connect_token.validate(opts.ConnectToken, opts.user_data_size);
     }
 
     const pending_cap = opts.max_pending_clients orelse opts.max_clients * 2;
@@ -75,6 +77,7 @@ pub fn Server(comptime opts: Options) type {
         events: RingQueue(Event, opts.events_queue_size),
 
         pub fn init(allocator: std.mem.Allocator, config: ServerConfig) !Self {
+            const now = try std.time.Instant.now();
             return .{
                 .allocator = allocator,
                 .protocol_id = config.protocol_id,
@@ -85,8 +88,8 @@ pub fn Server(comptime opts: Options) type {
                 .challenge_key = config.challenge_key,
                 .challenge_seq = 0,
                 .config = config,
-                .start_time = try std.time.Instant.now(),
-                .current_time = try std.time.Instant.now(),
+                .start_time = now,
+                .current_time = now,
                 .clients = [_]?Conn{null} ** opts.max_clients,
                 .addr_to_slot = std.AutoArrayHashMap(AddressKey, usize).init(allocator),
                 .recycled_slots = .{},
@@ -136,17 +139,16 @@ pub fn Server(comptime opts: Options) type {
             const conn = &(self.clients[slot] orelse return error.UnknownClient);
             if (body.len > opts.max_payload_size) return error.PayloadTooLarge;
 
-            var payload: packet_mod.Payload(opts) = .{
-                .len = @intCast(body.len),
-                .body = undefined,
-            };
-            @memcpy(payload.body[0..body.len], body);
-
             conn.last_send = self.getCurrentTime();
-            if (!self.outgoing.pushBack(.{
+            const out = self.outgoing.pushBackSlot() orelse return error.IoError;
+            out.* = .{
                 .addr = conn.addr,
-                .packet = .{ .Payload = payload },
-            })) return error.IoError;
+                .packet = .{ .Payload = .{
+                    .len = @intCast(body.len),
+                    .body = undefined,
+                } },
+            };
+            @memcpy(out.packet.Payload.body[0..body.len], body);
         }
 
         pub fn pollEvent(self: *Self) ?Event {
@@ -300,13 +302,19 @@ pub fn Server(comptime opts: Options) type {
                     const slot = self.addr_to_slot.get(AddressKey.fromAddress(addr)) orelse return error.UnknownClient;
                     const conn = &self.clients[slot].?;
                     conn.last_recv = self.getCurrentTime();
-                    if (!self.events.pushBack(.{
-                        .PayloadReceived = .{
-                            .cid = conn.cid,
-                            .addr = conn.addr,
-                            .payload = payload,
+                    const ev = self.events.pushBackSlot() orelse return error.IoError;
+                    ev.* = .{ .PayloadReceived = .{
+                        .cid = conn.cid,
+                        .addr = conn.addr,
+                        .payload = .{
+                            .len = payload.len,
+                            .body = undefined,
                         },
-                    })) return error.IoError;
+                    } };
+                    @memcpy(
+                        ev.PayloadReceived.payload.body[0..payload.len],
+                        payload.body[0..payload.len],
+                    );
                 },
                 .Disconnect => {
                     const key = AddressKey.fromAddress(addr);

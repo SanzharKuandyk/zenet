@@ -1,5 +1,6 @@
 const std = @import("std");
 const root = @import("../root.zig");
+const validation = @import("../validation/root.zig");
 const packet_mod = @import("../packet.zig");
 const handshake = @import("../handshake.zig");
 const Options = root.Options;
@@ -8,6 +9,8 @@ const ClientConfig = @import("config.zig").ClientConfig;
 const RingQueue = @import("../ring_buffer.zig").RingQueue;
 
 pub fn Client(comptime opts: Options) type {
+    comptime validation.options.validate(opts);
+
     const Pkt = packet_mod.Packet(opts);
     const ConnectTokenType = if (opts.ConnectToken == void)
         handshake.DefaultConnectToken(opts.user_data_size, opts.max_token_addresses)
@@ -143,7 +146,12 @@ pub fn Client(comptime opts: Options) type {
                 .Payload => |payload| {
                     if (self.state != .Connected) return error.InvalidPacket;
                     self.last_recv = self.getCurrentTime();
-                    _ = self.events.pushBack(.{ .PayloadReceived = payload });
+                    const ev = self.events.pushBackSlot() orelse return error.IoError;
+                    ev.* = .{ .PayloadReceived = .{
+                        .len = payload.len,
+                        .body = undefined,
+                    } };
+                    @memcpy(ev.PayloadReceived.body[0..payload.len], payload.body[0..payload.len]);
                 },
                 .Disconnect => {
                     if (self.state != .Connected) return error.InvalidPacket;
@@ -159,16 +167,15 @@ pub fn Client(comptime opts: Options) type {
             if (self.state != .Connected) return error.InvalidState;
             if (body.len > opts.max_payload_size) return error.PayloadTooLarge;
 
-            var payload: packet_mod.Payload(opts) = .{
-                .len = @intCast(body.len),
-                .body = undefined,
-            };
-            @memcpy(payload.body[0..body.len], body);
-
-            if (!self.outgoing.pushBack(.{
+            const out = self.outgoing.pushBackSlot() orelse return error.IoError;
+            out.* = .{
                 .addr = self.config.server_addr,
-                .packet = .{ .Payload = payload },
-            })) return error.IoError;
+                .packet = .{ .Payload = .{
+                    .len = @intCast(body.len),
+                    .body = undefined,
+                } },
+            };
+            @memcpy(out.packet.Payload.body[0..body.len], body);
         }
 
         pub fn disconnect(self: *Self) void {

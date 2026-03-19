@@ -1,5 +1,6 @@
 const std = @import("std");
 const root = @import("../root.zig");
+const validation = @import("../validation/root.zig");
 const packet_mod = @import("../packet.zig");
 const client_mod = @import("../client/client.zig");
 const channel_mod = @import("../channel.zig");
@@ -13,9 +14,8 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
     const Socket = if (SocketType == void) UdpSocket else SocketType;
 
     comptime {
-        if (SocketType != void) socket_mod.validateSocketInterface(Socket);
-        if (opts.channels.len == 0)
-            @compileError("Options.channels must have at least one entry");
+        validation.options.validate(opts);
+        if (SocketType != void) validation.socket.validate(Socket);
     }
 
     // TODO: cleanup
@@ -109,7 +109,7 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
                 .ul_state = [_]UlChannelState{.{}} ** UlCount,
                 .events = .{},
                 .messages = .{},
-                .message_pool = .{},
+                .message_pool = MessagePool.init(),
             };
         }
 

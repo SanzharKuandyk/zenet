@@ -30,6 +30,16 @@ pub fn RingQueue(comptime T: type, comptime N: usize) type {
             return true;
         }
 
+        /// Reserve the next back slot for in-place writes.
+        pub fn pushBackSlot(self: *Self) ?*T {
+            if (self.len == N) return null;
+
+            const slot = &self.buf[self.tail];
+            self.tail = (self.tail + 1) & mask;
+            self.len += 1;
+            return slot;
+        }
+
         pub fn popFront(self: *Self) ?T {
             if (self.len == 0) return null;
 

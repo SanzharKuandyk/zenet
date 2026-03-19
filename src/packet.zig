@@ -6,7 +6,9 @@
 
 const std = @import("std");
 const handshake = @import("handshake.zig");
-const Options = @import("root.zig").Options;
+const root = @import("root.zig");
+const validation = @import("validation/root.zig");
+const Options = root.Options;
 
 pub const ChallengeToken = handshake.ChallengeToken;
 pub const PROTOCOL_VERSION: u8 = 1;
@@ -42,6 +44,8 @@ fn TokenType(comptime opts: Options) type {
 }
 
 pub fn Packet(comptime opts: Options) type {
+    comptime validation.options.validate(opts);
+
     return union(enum) {
         ConnectionRequest: ConnectionRequest(opts),
         Challenge: Challenge,
@@ -53,6 +57,8 @@ pub fn Packet(comptime opts: Options) type {
 }
 
 pub fn maxPacketSize(comptime opts: Options) usize {
+    comptime validation.options.validate(opts);
+
     const token_wire_size = TokenType(opts).wire_size;
     // Worst-case packet is the secure connection request because the token size
     // is user-configurable, but payload packets cap out at max_payload_size.
@@ -63,6 +69,8 @@ pub fn maxPacketSize(comptime opts: Options) usize {
 }
 
 pub fn serialize(comptime opts: Options, p: Packet(opts), out: []u8) error{ BufferTooSmall, PayloadTooLarge }!usize {
+    comptime validation.options.validate(opts);
+
     if (out.len < maxPacketSize(opts)) return error.BufferTooSmall;
 
     out[0] = PROTOCOL_VERSION;
@@ -116,6 +124,8 @@ pub fn serialize(comptime opts: Options, p: Packet(opts), out: []u8) error{ Buff
 }
 
 pub fn deserialize(comptime opts: Options, bytes: []const u8) error{ InvalidPacket, UnsupportedVersion }!Packet(opts) {
+    comptime validation.options.validate(opts);
+
     if (bytes.len < 2) return error.InvalidPacket;
     if (bytes[0] != PROTOCOL_VERSION) return error.UnsupportedVersion;
 
@@ -183,6 +193,8 @@ pub fn deserialize(comptime opts: Options, bytes: []const u8) error{ InvalidPack
 }
 
 pub fn ConnectionRequest(comptime opts: Options) type {
+    comptime validation.options.validate(opts);
+
     return union(enum) {
         Plain: PlainConnectionRequest,
         Secure: SecureConnectionRequest(opts),
@@ -195,6 +207,8 @@ pub const PlainConnectionRequest = struct {
 };
 
 pub fn SecureConnectionRequest(comptime opts: Options) type {
+    comptime validation.options.validate(opts);
+
     return struct {
         protocol_id: u32,
         client_nonce: u64,
@@ -214,6 +228,8 @@ pub const ConnectionResponse = struct {
 };
 
 pub fn Payload(comptime opts: Options) type {
+    comptime validation.options.validate(opts);
+
     return struct {
         len: u16,
         body: [opts.max_payload_size]u8,
