@@ -534,7 +534,7 @@ test "transport loopback: peekMessage/consumeMessage zero-copy" {
     // peek does not consume
     const p1 = cli.peekMessage();
     try testing.expect(p1 != null);
-    try testing.expectEqualStrings("peek-test", p1.?.data[0.."peek-test".len]);
+    try testing.expectEqualStrings("peek-test", cli.messageData(p1.?));
 
     const p2 = cli.peekMessage();
     try testing.expect(p2 != null); // still there

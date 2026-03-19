@@ -109,11 +109,11 @@ pub fn main() !void {
             }
         }
 
-        // peekMessage returns a *const Message without removing it from the queue.
+        // peekMessage returns a zero-copy view without removing it from the queue.
         // consumeMessage advances the ring buffer. msg.cid identifies the sender.
         // msg.channel_id is the index into net_opts.channels.
         while (srv.peekMessage()) |msg| {
-            const data = msg.data[0..msg.len];
+            const data = srv.messageData(msg);
             switch (msg.channel_id) {
                 proto.CH_ACTION => {
                     if (data.len == 0) {

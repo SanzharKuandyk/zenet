@@ -168,7 +168,7 @@ pub fn deserialize(comptime opts: Options, bytes: []const u8) error{ InvalidPack
             if (len > opts.max_payload_size) return error.InvalidPacket;
             if (bytes.len != 4 + len) return error.InvalidPacket;
 
-            var body: [opts.max_payload_size]u8 = [_]u8{0} ** opts.max_payload_size;
+            var body: [opts.max_payload_size]u8 = undefined;
             @memcpy(body[0..len], bytes[4 .. 4 + len]);
             return .{ .Payload = .{
                 .len = len,

@@ -95,9 +95,10 @@ while (running) {
 
     // zero-copy: pointer into the ring buffer — no data[] copy
     while (srv.peekMessage()) |msg| {
-        std.debug.print("ch={} data={s}\n", .{ msg.channel_id, msg.data[0..msg.len] });
+        const data = srv.messageData(msg);
+        std.debug.print("ch={} data={s}\n", .{ msg.channel_id, data });
         // echo back
-        try srv.sendOnChannel(msg.cid, msg.channel_id, msg.data[0..msg.len]);
+        try srv.sendOnChannel(msg.cid, msg.channel_id, data);
         srv.consumeMessage();
     }
 }
@@ -125,7 +126,7 @@ while (running) {
     // zero-copy: pointer into the ring buffer — no data[] copy
     while (cli.peekMessage()) |msg| {
         std.debug.print("from server ch={} data={s}\n",
-            .{ msg.channel_id, msg.data[0..msg.len] });
+            .{ msg.channel_id, cli.messageData(msg) });
         cli.consumeMessage();
     }
 
@@ -244,12 +245,11 @@ while (srv.pollEvent()) |ev| {
 
 // incoming messages — zero-copy (preferred for large payloads)
 while (srv.peekMessage()) |msg| {
-    // msg : *const Message — points into ring buffer, no copy of data[]
+    // msg : *const MessageView — points into ring buffer, no data copy
     // msg.cid        : u64
     // msg.channel_id : u8
-    // msg.data       : [max_message_size]u8   (first msg.len bytes are valid)
-    // msg.len        : usize
-    _ = msg.data[0..msg.len];
+    // Use srv.messageData(msg) to read the payload bytes.
+    _ = srv.messageData(msg);
     srv.consumeMessage(); // advance the ring buffer
 }
 // or copy-out variant (simpler, fine for small payloads)
@@ -287,8 +287,9 @@ while (cli.pollEvent()) |ev| {
 
 // zero-copy (preferred for large payloads)
 while (cli.peekMessage()) |msg| {
-    // msg : *const Message — points into ring buffer, no copy of data[]
-    _ = msg.data[0..msg.len];
+    // msg : *const MessageView — points into ring buffer, no data copy
+    // Use cli.messageData(msg) to read the payload bytes.
+    _ = cli.messageData(msg);
     cli.consumeMessage();
 }
 // or copy-out variant

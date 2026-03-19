@@ -52,8 +52,10 @@ pub const TransportServer = @import("transport/server.zig").TransportServer;
 pub const TransportClient = @import("transport/client.zig").TransportClient;
 pub const UdpSocket = @import("transport/udp.zig").UdpSocket;
 pub const LoopbackSocket = @import("transport/loopback.zig").LoopbackSocket;
+pub const PayloadPool = @import("payload_pool.zig").PayloadPool;
 
 comptime {
     _ = @import("channel.zig");
+    _ = @import("payload_pool.zig");
     _ = @import("tests.zig");
 }

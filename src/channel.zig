@@ -272,6 +272,14 @@ pub fn ReliableOrderedRecvState(
         // Called on .deliver in transport
         // pop buffered packets
         pub fn popReady(self: *Self, out: []u8) ?usize {
+            const ready = self.peekReady() orelse return null;
+            const len = @min(ready.len, out.len);
+            @memcpy(out[0..len], ready[0..len]);
+            self.consumeReady();
+            return len;
+        }
+
+        pub fn peekReady(self: *Self) ?[]const u8 {
             if (comptime recv_window_size == 0) return null;
             const futures = self.futures orelse return null;
 
@@ -279,12 +287,18 @@ pub fn ReliableOrderedRecvState(
             const idx = @as(usize, self.next_seq) % recv_window_size;
             const entry = &futures[idx];
             if (!entry.active or entry.seq != self.next_seq) return null;
+            return entry.data[0..entry.len];
+        }
 
-            const len = @min(entry.len, out.len);
-            @memcpy(out[0..len], entry.data[0..len]);
+        pub fn consumeReady(self: *Self) void {
+            if (comptime recv_window_size == 0) return;
+            const futures = self.futures orelse return;
+            const idx = @as(usize, self.next_seq) % recv_window_size;
+            const entry = &futures[idx];
+            if (!entry.active or entry.seq != self.next_seq) return;
+
             entry.active = false;
             self.next_seq +%= 1;
-            return len;
         }
 
         pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {

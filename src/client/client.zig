@@ -161,7 +161,7 @@ pub fn Client(comptime opts: Options) type {
 
             var payload: packet_mod.Payload(opts) = .{
                 .len = @intCast(body.len),
-                .body = [_]u8{0} ** opts.max_payload_size,
+                .body = undefined,
             };
             @memcpy(payload.body[0..body.len], body);
 
@@ -182,11 +182,33 @@ pub fn Client(comptime opts: Options) type {
         }
 
         pub fn pollEvent(self: *Self) ?Event {
+            // Copy-out convenience API.
             return self.events.popFront();
         }
 
+        pub fn peekEvent(self: *const Self) ?*const Event {
+            // Zero-copy view into the front event.
+            return self.events.peekFront();
+        }
+
+        pub fn consumeEvent(self: *Self) void {
+            // Drop the event returned by peekEvent().
+            self.events.advance();
+        }
+
         pub fn pollOutgoing(self: *Self) ?Outgoing {
+            // Copy-out convenience API.
             return self.outgoing.popFront();
+        }
+
+        pub fn peekOutgoing(self: *const Self) ?*const Outgoing {
+            // Zero-copy view into the front outgoing packet.
+            return self.outgoing.peekFront();
+        }
+
+        pub fn consumeOutgoing(self: *Self) void {
+            // Drop the packet returned by peekOutgoing().
+            self.outgoing.advance();
         }
 
         fn updateHandshake(self: *Self, now: u64) void {

@@ -91,11 +91,11 @@ pub fn main() !void {
             }
         }
 
-        // peekMessage returns a pointer into the ring buffer without consuming.
+        // peekMessage returns a zero-copy view into the ring buffer.
         // msg.cid = sender, msg.channel_id = index into net_opts.channels.
         // consumeMessage advances the read pointer — call after processing.
         while (srv.peekMessage()) |msg| {
-            const data = msg.data[0..msg.len];
+            const data = srv.messageData(msg);
             switch (msg.channel_id) {
                 proto.CH_SESSION => {},
                 proto.CH_BALL => {

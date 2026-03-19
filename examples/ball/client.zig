@@ -92,7 +92,7 @@ pub fn main() !void {
         // peekMessage / consumeMessage: zero-copy ring-buffer access.
         // The pointer is valid until consumeMessage is called.
         while (cli.peekMessage()) |msg| {
-            handleMessage(msg);
+            handleMessage(&cli, msg);
             cli.consumeMessage();
         }
 
@@ -122,8 +122,8 @@ pub fn main() !void {
     }
 }
 
-fn handleMessage(msg: *const Cli.Message) void {
-    const data = msg.data[0..msg.len];
+fn handleMessage(cli: *const Cli, msg: *const Cli.MessageView) void {
+    const data = cli.messageData(msg);
     if (data.len == 0) return;
     switch (msg.channel_id) {
         proto.CH_SESSION => switch (data[0]) {
@@ -178,10 +178,10 @@ fn handleMovement(cli: *Cli) void {
     const b = &balls[id];
     const dt = rl.getFrameTime();
 
-    if (rl.isKeyDown(.w) or rl.isKeyDown(.up))    b.y -= proto.SPEED * dt;
-    if (rl.isKeyDown(.s) or rl.isKeyDown(.down))   b.y += proto.SPEED * dt;
-    if (rl.isKeyDown(.a) or rl.isKeyDown(.left))   b.x -= proto.SPEED * dt;
-    if (rl.isKeyDown(.d) or rl.isKeyDown(.right))  b.x += proto.SPEED * dt;
+    if (rl.isKeyDown(.w) or rl.isKeyDown(.up)) b.y -= proto.SPEED * dt;
+    if (rl.isKeyDown(.s) or rl.isKeyDown(.down)) b.y += proto.SPEED * dt;
+    if (rl.isKeyDown(.a) or rl.isKeyDown(.left)) b.x -= proto.SPEED * dt;
+    if (rl.isKeyDown(.d) or rl.isKeyDown(.right)) b.x += proto.SPEED * dt;
     b.x = std.math.clamp(b.x, proto.BALL_R, proto.W - proto.BALL_R);
     b.y = std.math.clamp(b.y, proto.BALL_R, proto.H - proto.BALL_R);
 
@@ -208,8 +208,7 @@ fn drawChat() void {
     const base_y = H - 30;
     if (chat_active) {
         var ibuf: [proto.MAX_CHAT + 4]u8 = undefined;
-        drawText(std.fmt.bufPrint(&ibuf, "> {s}_", .{chat_input[0..chat_input_len]}) catch "> _",
-            8, base_y, 18, .green, .left);
+        drawText(std.fmt.bufPrint(&ibuf, "> {s}_", .{chat_input[0..chat_input_len]}) catch "> _", 8, base_y, 18, .green, .left);
     }
     const visible = @min(chat_count, 6);
     for (0..visible) |vi| {
@@ -222,7 +221,10 @@ fn drawChat() void {
 }
 
 fn handleChatInput(cli: *Cli) void {
-    if (rl.isKeyPressed(.escape)) { chat_active = false; return; }
+    if (rl.isKeyPressed(.escape)) {
+        chat_active = false;
+        return;
+    }
     if (rl.isKeyPressed(.enter) or rl.isKeyPressed(.kp_enter)) {
         if (chat_input_len > 0) {
             var buf: [proto.MAX_CHAT + 2]u8 = undefined;
@@ -233,7 +235,10 @@ fn handleChatInput(cli: *Cli) void {
         chat_input_len = 0;
         return;
     }
-    if (rl.isKeyPressed(.backspace)) { if (chat_input_len > 0) chat_input_len -= 1; return; }
+    if (rl.isKeyPressed(.backspace)) {
+        if (chat_input_len > 0) chat_input_len -= 1;
+        return;
+    }
     const ch = rl.getCharPressed();
     if (ch > 0 and ch < 128 and chat_input_len < proto.MAX_CHAT) {
         chat_input[chat_input_len] = @intCast(@as(u32, @bitCast(ch)));
@@ -271,7 +276,9 @@ fn parseIp4(s: []const u8) ?[4]u8 {
         if (c == '.') {
             if (digits == 0 or i >= 3 or part > 255) return null;
             r[i] = @intCast(part);
-            i += 1; part = 0; digits = 0;
+            i += 1;
+            part = 0;
+            digits = 0;
         } else if (c >= '0' and c <= '9') {
             part = part * 10 + (c - '0');
             digits += 1;

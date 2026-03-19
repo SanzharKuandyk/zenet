@@ -95,7 +95,7 @@ pub fn main() !void {
         // peekMessage / consumeMessage: zero-copy ring-buffer access.
         // The pointer is valid until consumeMessage is called.
         while (cli.peekMessage()) |msg| {
-            handleMessage(msg);
+            handleMessage(&cli, msg);
             cli.consumeMessage();
         }
 
@@ -154,10 +154,10 @@ pub fn main() !void {
     }
 }
 
-fn handleMessage(msg: *const Cli.Message) void {
-    const data = msg.data[0..msg.len];
+fn handleMessage(cli: *const Cli, msg: *const Cli.MessageView) void {
+    const data = cli.messageData(msg);
     if (data.len == 0) return;
-    // msg.channel_id maps to net_opts.channels[i]; msg.data[0..msg.len] is the raw payload.
+    // msg.channel_id maps to net_opts.channels[i]; messageData(msg) is the raw payload.
     switch (msg.channel_id) {
         proto.CH_BALL => {
             if (proto.decodeBallState(data)) |bs| {

@@ -3,6 +3,7 @@ const root = @import("../root.zig");
 const packet_mod = @import("../packet.zig");
 const server_mod = @import("../server/server.zig");
 const channel_mod = @import("../channel.zig");
+const payload_pool_mod = @import("../payload_pool.zig");
 const socket_mod = @import("socket.zig");
 const RingQueue = @import("../ring_buffer.zig").RingQueue;
 const UdpSocket = @import("udp.zig").UdpSocket;
@@ -20,6 +21,9 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
     const Srv = server_mod.Server(opts);
     const max_packet_size = packet_mod.maxPacketSize(opts);
     const max_user_data = opts.max_payload_size - channel_mod.HEADER_SIZE;
+
+    const MessagePool = payload_pool_mod.PayloadPool(opts.messages_queue_size, max_user_data);
+    const MessagePayloadRef = MessagePool.Ref;
 
     const Layout = channel_mod.ChannelLayout(opts.channels);
     const channel_count = Layout.channel_count;
@@ -74,6 +78,13 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
             len: usize,
         };
 
+        pub const MessageView = struct {
+            cid: u64,
+            channel_id: u8,
+            // Bytes live in the transport payload pool until consumeMessage() releases them.
+            payload: MessagePayloadRef,
+        };
+
         srv: Srv,
         socket: Socket,
         // The channel schema is global, but runtime state is per client.
@@ -83,7 +94,8 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
         ul_state: *[opts.max_clients][UlCount]UlChannelState,
         allocator: std.mem.Allocator,
         events: RingQueue(Event, opts.events_queue_size),
-        messages: RingQueue(Message, opts.messages_queue_size),
+        messages: RingQueue(MessageView, opts.messages_queue_size),
+        message_pool: MessagePool,
 
         pub fn init(allocator: std.mem.Allocator, config: root.ServerConfig, bind_addr: std.net.Address) !Self {
             const socket = try Socket.open(bind_addr);
@@ -117,10 +129,12 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
                 .allocator = allocator,
                 .events = .{},
                 .messages = .{},
+                .message_pool = .{},
             };
         }
 
         pub fn deinit(self: *Self) void {
+            self.clearMessages();
             for (0..opts.max_clients) |slot| self.resetClientChannelState(slot);
             self.srv.deinit();
             self.socket.close();
@@ -139,9 +153,10 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
                 self.srv.handlePacket(result.addr, buf[0..result.len]) catch {};
             }
 
-            while (self.srv.pollEvent()) |ev| {
-                switch (ev) {
-                    .ClientConnected => |e| {
+            while (self.srv.peekEvent()) |ev| {
+                switch (std.meta.activeTag(ev.*)) {
+                    .ClientConnected => {
+                        const e = ev.ClientConnected;
                         const slot: usize = @intCast(e.cid);
                         self.resetClientChannelState(slot);
                         _ = self.events.pushBack(.{ .ClientConnected = .{
@@ -150,15 +165,20 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
                             .user_data = e.user_data,
                         } });
                     },
-                    .ClientDisconnected => |e| {
+                    .ClientDisconnected => {
+                        const e = ev.ClientDisconnected;
                         self.resetClientChannelState(@intCast(e.cid));
                         _ = self.events.pushBack(.{ .ClientDisconnected = .{
                             .cid = e.cid,
                             .addr = e.addr,
                         } });
                     },
-                    .PayloadReceived => |e| self.handleIncoming(e.cid, e.payload.body[0..e.payload.len]),
+                    .PayloadReceived => {
+                        const e = &ev.PayloadReceived;
+                        self.handleIncoming(e.cid, e.payload.body[0..e.payload.len]);
+                    },
                 }
+                self.srv.consumeEvent();
             }
 
             self.retransmitReliable(now_ns);
@@ -167,9 +187,13 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
 
         fn flushOutgoing(self: *Self) void {
             var buf: [max_packet_size]u8 = undefined;
-            while (self.srv.pollOutgoing()) |out| {
-                const len = packet_mod.serialize(opts, out.packet, buf[0..]) catch continue;
+            while (self.srv.peekOutgoing()) |out| {
+                const len = packet_mod.serialize(opts, out.packet, buf[0..]) catch {
+                    self.srv.consumeOutgoing();
+                    continue;
+                };
                 self.socket.sendto(out.addr, buf[0..len]);
+                self.srv.consumeOutgoing();
             }
         }
 
@@ -225,7 +249,7 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
                 if (!e.active) continue;
                 if (now_ns -| e.sent_at < opts.reliable_resend_ns) continue;
 
-                var body: [opts.max_payload_size]u8 = [_]u8{0} ** opts.max_payload_size;
+                var body: [opts.max_payload_size]u8 = undefined;
                 const body_len = channel_mod.HEADER_SIZE + e.len;
                 channel_mod.encodeHeader(body[0..channel_mod.HEADER_SIZE], channel_id, e.seq);
                 @memcpy(body[channel_mod.HEADER_SIZE..body_len], e.data[0..e.len]);
@@ -239,7 +263,7 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
             const slot: usize = @intCast(cid);
             const now_ns = self.srv.getCurrentTime();
 
-            var body: [opts.max_payload_size]u8 = [_]u8{0} ** opts.max_payload_size;
+            var body: [opts.max_payload_size]u8 = undefined;
             const data_len = @min(data.len, max_user_data);
             const body_len = channel_mod.HEADER_SIZE + data_len;
 
@@ -276,18 +300,39 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
         }
 
         pub fn pollEvent(self: *Self) ?Event {
+            // Copy-out convenience API.
             return self.events.popFront();
         }
 
         pub fn pollMessage(self: *Self) ?Message {
-            return self.messages.popFront();
+            // Copy-out convenience API built on top of the zero-copy message view.
+            const msg = self.peekMessage() orelse return null;
+            const data = self.messageData(msg);
+            var owned: Message = .{
+                .cid = msg.cid,
+                .channel_id = msg.channel_id,
+                .data = undefined,
+                .len = data.len,
+            };
+            @memcpy(owned.data[0..owned.len], data);
+            self.consumeMessage();
+            return owned;
         }
 
-        pub fn peekMessage(self: *const Self) ?*const Message {
+        pub fn peekMessage(self: *const Self) ?*const MessageView {
+            // Zero-copy view into the front message. Read bytes with messageData(msg).
             return self.messages.peekFront();
         }
 
+        pub fn messageData(self: *const Self, msg: *const MessageView) []const u8 {
+            return self.message_pool.slice(msg.payload);
+        }
+
         pub fn consumeMessage(self: *Self) void {
+            // Drop the message returned by peekMessage() and release its pooled bytes.
+            const msg = self.messages.peekFront() orelse return;
+            // Releasing here makes peekMessage() the zero-copy path and keeps pollMessage() simple.
+            self.message_pool.release(msg.payload);
             self.messages.advance();
         }
 
@@ -340,10 +385,10 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
                     self.sendAck(cid, channel_id, seq);
                     self.enqueueMessage(cid, channel_id, body);
 
-                    var ready_body: [opts.max_payload_size]u8 = undefined;
                     // The missing packet arrived, so any buffered followers may now be deliverable too.
-                    while (recv.popReady(ready_body[0..])) |ready_len| {
-                        self.enqueueMessage(cid, channel_id, ready_body[0..ready_len]);
+                    while (recv.peekReady()) |ready_body| {
+                        self.enqueueMessage(cid, channel_id, ready_body);
+                        recv.consumeReady();
                     }
                 },
             }
@@ -357,15 +402,15 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
         }
 
         fn enqueueMessage(self: *Self, cid: u64, channel_id: u8, body: []const u8) void {
-            const data_len = body.len -| channel_mod.HEADER_SIZE;
-            var msg: Message = .{
+            const user = body[channel_mod.HEADER_SIZE..];
+            const payload = self.message_pool.allocCopy(user) orelse return;
+            if (!self.messages.pushBack(.{
                 .cid = cid,
                 .channel_id = channel_id,
-                .data = [_]u8{0} ** max_user_data,
-                .len = @min(data_len, max_user_data),
-            };
-            @memcpy(msg.data[0..msg.len], body[channel_mod.HEADER_SIZE .. channel_mod.HEADER_SIZE + msg.len]);
-            _ = self.messages.pushBack(msg);
+                .payload = payload,
+            })) {
+                self.message_pool.release(payload);
+            }
         }
 
         fn orderedSendPtr(self: *Self, slot: usize, channel_id: u8) ?*?*RelState {
@@ -420,6 +465,13 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
             self.ordered_state[slot] = [_]OrderedChannelState{.{}} ** OrderedCount;
             self.unordered_state[slot] = [_]UnorderedChannelState{.{}} ** UnorderedCount;
             self.ul_state[slot] = [_]UlChannelState{.{}} ** UlCount;
+        }
+
+        fn clearMessages(self: *Self) void {
+            while (self.messages.peekFront()) |msg| {
+                self.message_pool.release(msg.payload);
+                self.messages.advance();
+            }
         }
     };
 }
