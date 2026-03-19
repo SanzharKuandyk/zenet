@@ -17,18 +17,24 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
             @compileError("Options.channels must have at least one entry");
     }
 
+    // TODO: cleanup
     const Cli = client_mod.Client(opts);
     const max_packet_size = packet_mod.maxPacketSize(opts);
-    const channel_count = opts.channels.len;
     const max_user_data = opts.max_payload_size - channel_mod.HEADER_SIZE;
+
+    const Layout = channel_mod.ChannelLayout(opts.channels);
+    const channel_count = Layout.channel_count;
+
     const RelState = channel_mod.ReliableState(opts.reliable_buffer, max_user_data);
-    const OrderedCount = channel_mod.countChannels(opts.channels, .ReliableOrdered);
-    const UnorderedCount = channel_mod.countChannels(opts.channels, .ReliableUnordered);
-    const UlCount = channel_mod.countChannels(opts.channels, .UnreliableLatest);
-    const OrderedMap = comptime channel_mod.makeChannelIndexMap(opts.channels, .ReliableOrdered);
-    const UnorderedMap = comptime channel_mod.makeChannelIndexMap(opts.channels, .ReliableUnordered);
-    const UlMap = comptime channel_mod.makeChannelIndexMap(opts.channels, .UnreliableLatest);
+    const OrderedRecvState = channel_mod.ReliableOrderedRecvState(
+        opts.reliable_ordered_recv_window,
+        opts.max_payload_size,
+    );
     const UnorderedRecvState = channel_mod.ReliableUnorderedRecvState(opts.reliable_buffer);
+
+    const OrderedCount = Layout.ordered_count;
+    const UnorderedCount = Layout.unordered_count;
+    const UlCount = Layout.latest_count;
 
     const ConnectTokenType = if (opts.ConnectToken == void)
         @import("../handshake.zig").DefaultConnectToken(opts.user_data_size, opts.max_token_addresses)
@@ -37,7 +43,7 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
 
     const OrderedChannelState = struct {
         send: RelState = .{},
-        recv: channel_mod.ReliableOrderedRecvState = .{},
+        recv: OrderedRecvState = .{},
     };
 
     const UnorderedChannelState = struct {
@@ -64,6 +70,7 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
 
         cli: Cli,
         socket: Socket,
+        allocator: std.mem.Allocator,
         // State is split by channel kind so each channel only keeps what it uses.
         ordered_state: [OrderedCount]OrderedChannelState,
         unordered_state: [UnorderedCount]UnorderedChannelState,
@@ -85,6 +92,7 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
             return .{
                 .cli = cli,
                 .socket = socket,
+                .allocator = std.heap.page_allocator,
                 .ordered_state = [_]OrderedChannelState{.{}} ** OrderedCount,
                 .unordered_state = [_]UnorderedChannelState{.{}} ** UnorderedCount,
                 .ul_state = [_]UlChannelState{.{}} ** UlCount,
@@ -94,6 +102,7 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
         }
 
         pub fn deinit(self: *Self) void {
+            self.resetChannelState();
             self.socket.close();
         }
 
@@ -145,7 +154,7 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
             const hdr = channel_mod.Header.decode(body) orelse return;
             if (hdr.channel_id >= channel_count) return;
             const ch_idx = hdr.channel_id;
-            const kind = opts.channels[ch_idx];
+            const kind = Layout.kind(ch_idx);
 
             if (hdr.is_ack) {
                 self.handleAck(ch_idx, kind, hdr.seq);
@@ -155,7 +164,10 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
             switch (kind) {
                 .Unreliable => {},
                 .UnreliableLatest => if (!self.acceptLatest(ch_idx, hdr.seq)) return,
-                .ReliableOrdered => if (!self.acceptReliableOrdered(ch_idx, hdr.seq)) return,
+                .ReliableOrdered => {
+                    self.handleReliableOrdered(ch_idx, hdr.seq, body);
+                    return;
+                },
                 .ReliableUnordered => if (!self.acceptReliableUnordered(ch_idx, hdr.seq)) return,
             }
 
@@ -164,7 +176,7 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
 
         fn retransmitReliable(self: *Self, now_ns: u64) void {
             for (0..channel_count) |ch_idx| {
-                switch (opts.channels[ch_idx]) {
+                switch (Layout.kind(@intCast(ch_idx))) {
                     .ReliableOrdered => {
                         const send = self.orderedSendState(@intCast(ch_idx)) orelse continue;
                         self.retransmitState(send, @intCast(ch_idx), now_ns);
@@ -200,12 +212,12 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
             const data_len = @min(data.len, max_user_data);
             const body_len = channel_mod.HEADER_SIZE + data_len;
 
-            switch (opts.channels[channel_id]) {
+            switch (Layout.kind(channel_id)) {
                 .Unreliable => {
                     channel_mod.encodeHeader(body[0..channel_mod.HEADER_SIZE], channel_id, 0);
                 },
                 .UnreliableLatest => {
-                    const idx = self.ulIndex(channel_id) orelse return error.InvalidChannel;
+                    const idx = Layout.latestIndex(channel_id) orelse return error.InvalidChannel;
                     const st = &self.ul_state[idx];
                     st.send_seq +%= 1;
                     channel_mod.encodeHeader(
@@ -290,13 +302,26 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
             return recv.accept(seq);
         }
 
-        fn acceptReliableOrdered(self: *Self, channel_id: u8, seq: u16) bool {
-            const recv = self.orderedRecvState(channel_id) orelse return false;
-            const action = recv.classify(seq);
-            if (action == .future) return false;
+        fn handleReliableOrdered(self: *Self, channel_id: u8, seq: u16, body: []const u8) void {
+            const recv = self.orderedRecvState(channel_id) orelse return;
+            const action = recv.receive(self.allocator, seq, body) catch return;
+            switch (action) {
+                .drop => return,
+                .ack_only => {
+                    self.sendAck(channel_id, seq);
+                    return;
+                },
+                .deliver => {
+                    self.sendAck(channel_id, seq);
+                    self.enqueueMessage(channel_id, body);
 
-            self.sendAck(channel_id, seq);
-            return action == .deliver;
+                    var ready_body: [opts.max_payload_size]u8 = undefined;
+                    // The missing packet arrived, so any buffered followers may now be deliverable too.
+                    while (recv.popReady(ready_body[0..])) |ready_len| {
+                        self.enqueueMessage(channel_id, ready_body[0..ready_len]);
+                    }
+                },
+            }
         }
 
         fn acceptReliableUnordered(self: *Self, channel_id: u8, seq: u16) bool {
@@ -317,58 +342,40 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
             _ = self.messages.pushBack(msg);
         }
 
-        fn orderedIndex(self: *const Self, channel_id: u8) ?usize {
-            _ = self;
-            if (OrderedCount == 0) return null;
-            const idx = OrderedMap[channel_id] orelse return null;
-            return idx;
-        }
-
-        fn unorderedIndex(self: *const Self, channel_id: u8) ?usize {
-            _ = self;
-            if (UnorderedCount == 0) return null;
-            const idx = UnorderedMap[channel_id] orelse return null;
-            return idx;
-        }
-
-        fn ulIndex(self: *const Self, channel_id: u8) ?usize {
-            _ = self;
-            if (UlCount == 0) return null;
-            const idx = UlMap[channel_id] orelse return null;
-            return idx;
-        }
-
         fn orderedSendState(self: *Self, channel_id: u8) ?*RelState {
-            const idx = self.orderedIndex(channel_id) orelse return null;
+            const idx = Layout.orderedIndex(channel_id) orelse return null;
             if (OrderedCount == 0) return null;
             return &self.ordered_state[idx].send;
         }
 
         fn unorderedSendState(self: *Self, channel_id: u8) ?*RelState {
-            const idx = self.unorderedIndex(channel_id) orelse return null;
+            const idx = Layout.unorderedIndex(channel_id) orelse return null;
             if (UnorderedCount == 0) return null;
             return &self.unordered_state[idx].send;
         }
 
-        fn orderedRecvState(self: *Self, channel_id: u8) ?*channel_mod.ReliableOrderedRecvState {
-            const idx = self.orderedIndex(channel_id) orelse return null;
+        fn orderedRecvState(self: *Self, channel_id: u8) ?*OrderedRecvState {
+            const idx = Layout.orderedIndex(channel_id) orelse return null;
             if (OrderedCount == 0) return null;
             return &self.ordered_state[idx].recv;
         }
 
         fn unorderedRecvStatePtr(self: *Self, channel_id: u8) ?*UnorderedRecvState {
-            const idx = self.unorderedIndex(channel_id) orelse return null;
+            const idx = Layout.unorderedIndex(channel_id) orelse return null;
             if (UnorderedCount == 0) return null;
             return &self.unordered_state[idx].recv;
         }
 
         fn ulRecvState(self: *Self, channel_id: u8) ?*channel_mod.UnreliableLatestState {
-            const idx = self.ulIndex(channel_id) orelse return null;
+            const idx = Layout.latestIndex(channel_id) orelse return null;
             if (UlCount == 0) return null;
             return &self.ul_state[idx].recv;
         }
 
         fn resetChannelState(self: *Self) void {
+            for (0..OrderedCount) |idx| {
+                self.ordered_state[idx].recv.deinit(self.allocator);
+            }
             self.ordered_state = [_]OrderedChannelState{.{}} ** OrderedCount;
             self.unordered_state = [_]UnorderedChannelState{.{}} ** UnorderedCount;
             self.ul_state = [_]UlChannelState{.{}} ** UlCount;

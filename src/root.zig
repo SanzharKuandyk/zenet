@@ -7,7 +7,7 @@ pub const handshake = @import("handshake.zig");
 
 pub const ChannelKind = @import("channel.zig").ChannelKind;
 
-/// Single comptime config shared by both Server and (future) Client.
+/// Single comptime config shared by both Server and Client.
 /// Both sides must use identical options — the wire format depends on it.
 pub const Options = struct {
     max_clients: usize = 1024,
@@ -31,6 +31,10 @@ pub const Options = struct {
     reliable_buffer: usize = 64,
     /// Nanoseconds before an unACKed reliable message is resent.
     reliable_resend_ns: u64 = 100 * std.time.ns_per_ms,
+    /// Maximum number of packets of the future packet buffer in ReliableOrdered.
+    /// When N+1 packet is expected and N+2 packet came,
+    /// the latter will be stored instead of being dropped if > 0.
+    reliable_ordered_recv_window: usize = 32,
     /// Capacity of the incoming message queue in TransportServer/TransportClient.
     /// Sized separately from events_queue_size because messages arrive far more often.
     messages_queue_size: usize = 256,
