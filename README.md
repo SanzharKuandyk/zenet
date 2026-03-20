@@ -156,7 +156,8 @@ const opts: zenet.Options = .{
 
     // Reliable channel tuning
     .reliable_buffer      = 64,    // unACKed send slots per channel per peer
-    .reliable_resend_ns   = 100 * std.time.ns_per_ms,  // retransmit interval
+    .reliable_resend_ns   = 100 * std.time.ns_per_ms,  // minimum retransmit interval (floor for RTT-based RTO)
+    .reliable_ordered_recv_window = 32, // future-packet buffer depth for ReliableOrdered
 
     // Queue sizes
     .outgoing_queue_size  = 256,
@@ -168,6 +169,12 @@ const opts: zenet.Options = .{
     .ConnectToken         = void,
 };
 ```
+
+`reliable_resend_ns` acts as the **minimum floor** for the per-client adaptive
+retransmit timeout. The transport layers track a smoothed RTT (SRTT) per
+connection and compute `RTO = max(srtt * 2, reliable_resend_ns)`, so on low
+latency links retransmits happen sooner and on high latency links spurious
+retransmits are avoided.
 
 ---
 
@@ -250,7 +257,7 @@ while (srv.peekMessage()) |msg| {
     // msg.channel_id : u8
     // Use srv.messageData(msg) to read the payload bytes.
     _ = srv.messageData(msg);
-    srv.consumeMessage(); // advance the ring buffer
+    srv.consumeMessage(); // advance the ring buffer and release pooled bytes
 }
 // or copy-out variant (simpler, fine for small payloads)
 while (srv.pollMessage()) |msg| {
@@ -260,8 +267,9 @@ while (srv.pollMessage()) |msg| {
 // outgoing
 try srv.sendOnChannel(cid, channel_id, data_slice);
 
-// disconnect a client
-srv.getStateMachine().sendPayload(cid, disconnect_body) catch {};
+// access the underlying state machine (e.g. to send raw payloads)
+const sm = srv.getStateMachine(); // *Server(opts)
+try sm.sendPayload(cid, payload_body);
 ```
 
 ### TransportClient
@@ -466,22 +474,39 @@ srv.update(try std.time.Instant.now());
 // feed a received datagram
 try srv.handlePacket(source_addr, datagram_bytes);
 
-// drain outgoing — send each packet to its address
+// drain outgoing — zero-copy peek/consume pattern
+while (srv.peekOutgoing()) |out| {
+    // out : *const Outgoing — points into the ring buffer
+    // out.addr   : std.net.Address
+    // out.packet : Packet(opts)
+    udp_send(out.addr, out.packet);
+    srv.consumeOutgoing();
+}
+// or copy-out variant
 while (srv.pollOutgoing()) |out| {
-    udp_send(out.addr, std.mem.asBytes(&out.packet));
+    udp_send(out.addr, out.packet);
 }
 
-// drain events
-while (srv.pollEvent()) |ev| {
-    switch (ev) {
-        .ClientConnected    => |e| { _ = e.cid; _ = e.user_data; },
-        .ClientDisconnected => |e| { _ = e.cid; },
-        .PayloadReceived    => |e| { _ = e.cid; _ = e.payload.body; },
+// drain events — zero-copy peek/consume pattern
+while (srv.peekEvent()) |ev| {
+    switch (std.meta.activeTag(ev.*)) {
+        .ClientConnected    => { _ = ev.ClientConnected.cid; },
+        .ClientDisconnected => { _ = ev.ClientDisconnected.cid; },
+        .PayloadReceived    => { _ = ev.PayloadReceived.payload.body; },
     }
+    srv.consumeEvent();
 }
+// or copy-out variant
+while (srv.pollEvent()) |ev| { ... }
 
-// send a raw payload to a connected client
+// send a raw payload body to a connected client (copies into outgoing ring)
 try srv.sendPayload(cid, payload_body); // payload_body: []const u8
+
+// zero-copy send: reserve a slot and write directly (avoids one memcpy)
+const out = try srv.reservePayloadSlot(cid);
+const body = &out.packet.Payload.body;
+// write your channel header + data into body[0..], then set the length:
+out.packet.Payload.len = body_len;
 ```
 
 ### Client
@@ -498,19 +523,27 @@ cli.update(try std.time.Instant.now());
 
 try cli.handlePacket(datagram_bytes);
 
-while (cli.pollOutgoing()) |out| {
-    udp_send(out.addr, std.mem.asBytes(&out.packet));
+// drain outgoing — zero-copy peek/consume pattern
+while (cli.peekOutgoing()) |out| {
+    udp_send(out.addr, out.packet);
+    cli.consumeOutgoing();
 }
 
-while (cli.pollEvent()) |ev| {
-    switch (ev) {
+while (cli.peekEvent()) |ev| {
+    switch (std.meta.activeTag(ev.*)) {
         .Connected       => {},
         .Disconnected    => {},
-        .PayloadReceived => |p| { _ = p.body; },
+        .PayloadReceived => { _ = ev.PayloadReceived.body; },
     }
+    cli.consumeEvent();
 }
 
-try cli.sendPayload(payload_body); // payload_body: []const u8
+// send a raw payload body (copies into outgoing ring)
+try cli.sendPayload(payload_body);
+
+// zero-copy send: reserve a slot and write directly
+const out = try cli.reservePayloadSlot();
+out.packet.Payload.len = body_len;
 
 cli.disconnect();
 ```
@@ -560,22 +593,25 @@ src/
   root.zig              public API re-exports and Options
   packet.zig            wire-format serialization/deserialization
   channel.zig           channel header encoding, channel kind helpers,
-                        reliable send/receive state
+                        ReliableState, RttState, recv state machines
   handshake.zig         HMAC challenge tokens, DefaultConnectToken,
                         validateConnectTokenInterface
+  payload_pool.zig      O(1) free-list pool for inbound message bytes
+  ring_buffer.zig       fixed-capacity queue with peek/consume zero-copy API
   addr.zig              address normalization for hash-map keys
   nonce.zig             sliding-window replay protection
-  ring_buffer.zig       fixed-capacity queue (no allocator)
   tests.zig             state-machine integration tests + loopback transport tests
 
   server/
-    server.zig          Server state machine (handlePacket, pollEvent, …)
+    server.zig          Server state machine (handlePacket, sendPayload,
+                        reservePayloadSlot, peekOutgoing/consumeOutgoing, …)
     config.zig          ServerConfig
     connection.zig      per-client connection state
     error.zig           ServerError
 
   client/
-    client.zig          Client state machine
+    client.zig          Client state machine (handlePacket, sendPayload,
+                        reservePayloadSlot, peekOutgoing/consumeOutgoing, …)
     config.zig          ClientConfig
     error.zig           ClientError
 
@@ -583,8 +619,16 @@ src/
     socket.zig          RecvResult type + validateSocketInterface
     udp.zig             built-in non-blocking UDP socket (Windows + POSIX)
     loopback.zig        in-memory LoopbackSocket + Pair for testing
-    server.zig          TransportServer — owns socket, drives I/O loop
-    client.zig          TransportClient — owns socket, drives I/O loop
+    server.zig          TransportServer — owns socket, drives I/O loop,
+                        per-client RTT tracking
+    client.zig          TransportClient — owns socket, drives I/O loop,
+                        per-connection RTT tracking
+
+  validation/
+    root.zig            re-exports all validation helpers
+    options.zig         comptime checks for Options (channel counts, sizes, …)
+    socket.zig          comptime checks for custom socket interface
+    connect_token.zig   comptime checks for custom ConnectToken interface
 ```
 
 ---
