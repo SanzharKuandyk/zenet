@@ -178,6 +178,20 @@ pub fn Client(comptime opts: Options) type {
             @memcpy(out.packet.Payload.body[0..body.len], body);
         }
 
+        /// Reserve an outgoing payload slot for direct writes.
+        pub fn reservePayloadSlot(self: *Self) ClientError!*Outgoing {
+            if (self.state != .Connected) return error.InvalidState;
+            const out = self.outgoing.pushBackSlot() orelse return error.IoError;
+            out.* = .{
+                .addr = self.config.server_addr,
+                .packet = .{ .Payload = .{
+                    .len = 0,
+                    .body = undefined,
+                } },
+            };
+            return out;
+        }
+
         pub fn disconnect(self: *Self) void {
             if (self.state != .Connected) return;
             self.state = .Disconnected;

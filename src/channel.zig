@@ -134,6 +134,29 @@ pub const Header = struct {
     }
 };
 
+/// Per-connection smoothed RTT state for adaptive retransmission.
+pub const RttState = struct {
+    srtt: u64 = 0,
+    initialized: bool = false,
+
+    /// Feed an RTT sample (now - sent_at) from an ACK.
+    pub fn update(self: *RttState, rtt_sample: u64) void {
+        if (!self.initialized) {
+            self.srtt = rtt_sample;
+            self.initialized = true;
+        } else {
+            // EWMA: srtt = srtt * 7/8 + sample * 1/8
+            self.srtt = (self.srtt * 7 + rtt_sample) / 8;
+        }
+    }
+
+    /// Compute retransmission timeout: max(srtt * 2, min_rto).
+    pub fn rto(self: *const RttState, min_rto: u64) u64 {
+        if (!self.initialized) return min_rto;
+        return @max(self.srtt * 2, min_rto);
+    }
+};
+
 /// Per-channel receive state for UnreliableLatest: drop packets older than last received.
 pub const UnreliableLatestState = struct {
     last_seq: u16 = 0,
@@ -170,42 +193,40 @@ pub fn ReliableState(comptime buf_size: usize, comptime data_cap: usize) type {
         entries: [buf_size]Entry = [_]Entry{.{}} ** buf_size,
 
         /// Enqueue a message for reliable delivery. Returns the assigned sequence number,
-        /// or null if the send buffer is full.
+        /// or null if the send buffer is full (the slot for the next seq is still unACKed).
         pub fn push(self: *Self, data: []const u8, now: u64) ?u16 {
-            for (&self.entries) |*e| {
-                if (!e.active) {
-                    self.send_seq +%= 1;
-                    const copy_len = @min(data.len, data_cap);
-                    e.* = .{
-                        .seq = self.send_seq,
-                        .len = copy_len,
-                        .sent_at = now,
-                        .active = true,
-                    };
-                    @memcpy(e.data[0..copy_len], data[0..copy_len]);
-                    return self.send_seq;
-                }
+            const next_seq = self.send_seq +% 1;
+            const idx = @as(usize, next_seq) % buf_size;
+            if (self.entries[idx].active) return null; // buffer full
+            self.send_seq = next_seq;
+            const copy_len = @min(data.len, data_cap);
+            self.entries[idx] = .{
+                .seq = next_seq,
+                .len = copy_len,
+                .sent_at = now,
+                .active = true,
+            };
+            @memcpy(self.entries[idx].data[0..copy_len], data[0..copy_len]);
+            return next_seq;
+        }
+
+        /// Mark a sequence number as acknowledged; frees the slot.
+        /// Returns the entry's sent_at timestamp for RTT measurement, or null if not found.
+        pub fn ack(self: *Self, seq: u16) ?u64 {
+            const idx = @as(usize, seq) % buf_size;
+            if (self.entries[idx].active and self.entries[idx].seq == seq) {
+                const sent_at = self.entries[idx].sent_at;
+                self.entries[idx].active = false;
+                return sent_at;
             }
             return null;
         }
 
-        /// Mark a sequence number as acknowledged; frees the slot.
-        pub fn ack(self: *Self, seq: u16) void {
-            for (&self.entries) |*e| {
-                if (e.active and e.seq == seq) {
-                    e.active = false;
-                    return;
-                }
-            }
-        }
-
         /// Mark an entry as re-sent (update sent_at) so the resend timer resets.
         pub fn markResent(self: *Self, seq: u16, now: u64) void {
-            for (&self.entries) |*e| {
-                if (e.active and e.seq == seq) {
-                    e.sent_at = now;
-                    return;
-                }
+            const idx = @as(usize, seq) % buf_size;
+            if (self.entries[idx].active and self.entries[idx].seq == seq) {
+                self.entries[idx].sent_at = now;
             }
         }
     };
@@ -460,7 +481,7 @@ test "ReliableState push and ack" {
     const seq2 = state.push(&data, 0).?;
     try testing.expectEqual(@as(u16, 2), seq2);
 
-    state.ack(seq1);
+    _ = state.ack(seq1);
 
     // Slot freed, can push again
     const seq3 = state.push(&data, 0).?;

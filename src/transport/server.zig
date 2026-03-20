@@ -92,6 +92,7 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
         ordered_state: *[opts.max_clients][OrderedCount]OrderedChannelState,
         unordered_state: *[opts.max_clients][UnorderedCount]UnorderedChannelState,
         ul_state: *[opts.max_clients][UlCount]UlChannelState,
+        rtt_state: *[opts.max_clients]channel_mod.RttState,
         allocator: std.mem.Allocator,
         events: RingQueue(Event, opts.events_queue_size),
         messages: RingQueue(MessageView, opts.messages_queue_size),
@@ -119,6 +120,10 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
             errdefer allocator.destroy(ul_state);
             for (ul_state) |*row| row.* = [_]UlChannelState{.{}} ** UlCount;
 
+            const rtt_state = try allocator.create([opts.max_clients]channel_mod.RttState);
+            errdefer allocator.destroy(rtt_state);
+            rtt_state.* = [_]channel_mod.RttState{.{}} ** opts.max_clients;
+
             const srv = try Srv.init(allocator, config);
             return .{
                 .srv = srv,
@@ -126,6 +131,7 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
                 .ordered_state = ordered_state,
                 .unordered_state = unordered_state,
                 .ul_state = ul_state,
+                .rtt_state = rtt_state,
                 .allocator = allocator,
                 .events = .{},
                 .messages = .{},
@@ -141,6 +147,7 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
             self.allocator.destroy(self.ordered_state);
             self.allocator.destroy(self.unordered_state);
             self.allocator.destroy(self.ul_state);
+            self.allocator.destroy(self.rtt_state);
         }
 
         pub fn tick(self: *Self) void {
@@ -223,20 +230,20 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
         }
 
         fn retransmitReliable(self: *Self, now_ns: u64) void {
-            for (0..opts.max_clients) |slot| {
-                _ = self.srv.clients[slot] orelse continue;
-
+            // Iterate only connected clients via addr_to_slot.
+            for (self.srv.addr_to_slot.values()) |slot| {
+                const rto = self.rtt_state[slot].rto(opts.reliable_resend_ns);
                 for (0..channel_count) |ch_idx| {
                     switch (Layout.kind(@intCast(ch_idx))) {
                         .ReliableOrdered => {
                             const send_ptr = self.orderedSendPtr(slot, @intCast(ch_idx)) orelse continue;
                             const rel = send_ptr.* orelse continue;
-                            self.retransmitState(rel, @intCast(slot), @intCast(ch_idx), now_ns);
+                            self.retransmitState(rel, @intCast(slot), @intCast(ch_idx), now_ns, rto);
                         },
                         .ReliableUnordered => {
                             const send_ptr = self.unorderedSendPtr(slot, @intCast(ch_idx)) orelse continue;
                             const rel = send_ptr.* orelse continue;
-                            self.retransmitState(rel, @intCast(slot), @intCast(ch_idx), now_ns);
+                            self.retransmitState(rel, @intCast(slot), @intCast(ch_idx), now_ns, rto);
                         },
                         else => {},
                     }
@@ -244,10 +251,10 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
             }
         }
 
-        fn retransmitState(self: *Self, rel: *RelState, cid: u64, channel_id: u8, now_ns: u64) void {
+        fn retransmitState(self: *Self, rel: *RelState, cid: u64, channel_id: u8, now_ns: u64, rto: u64) void {
             for (&rel.entries) |*e| {
                 if (!e.active) continue;
-                if (now_ns -| e.sent_at < opts.reliable_resend_ns) continue;
+                if (now_ns -| e.sent_at < rto) continue;
 
                 var body: [opts.max_payload_size]u8 = undefined;
                 const body_len = channel_mod.HEADER_SIZE + e.len;
@@ -262,41 +269,37 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
             if (channel_id >= channel_count) return error.InvalidChannel;
             const slot: usize = @intCast(cid);
             const now_ns = self.srv.getCurrentTime();
-
-            var body: [opts.max_payload_size]u8 = undefined;
             const data_len = @min(data.len, max_user_data);
             const body_len = channel_mod.HEADER_SIZE + data_len;
 
+            // For reliable channels, push to retransmit buffer first (may fail with BufferFull).
+            var seq: u16 = 0;
             switch (Layout.kind(channel_id)) {
-                .Unreliable => {
-                    channel_mod.encodeHeader(body[0..channel_mod.HEADER_SIZE], channel_id, 0);
-                },
+                .Unreliable => {},
                 .UnreliableLatest => {
                     const idx = Layout.latestIndex(channel_id) orelse return error.InvalidChannel;
                     const st = &self.ul_state[slot][idx];
                     st.send_seq +%= 1;
-                    channel_mod.encodeHeader(
-                        body[0..channel_mod.HEADER_SIZE],
-                        channel_id,
-                        st.send_seq,
-                    );
+                    seq = st.send_seq;
                 },
                 .ReliableOrdered => {
                     const send_ptr = self.orderedSendPtr(slot, channel_id) orelse return error.InvalidChannel;
                     const rel = try self.getOrCreateReliableState(send_ptr);
-                    const seq = rel.push(data[0..data_len], now_ns) orelse return error.ReliableBufferFull;
-                    channel_mod.encodeHeader(body[0..channel_mod.HEADER_SIZE], channel_id, seq);
+                    seq = rel.push(data[0..data_len], now_ns) orelse return error.ReliableBufferFull;
                 },
                 .ReliableUnordered => {
                     const send_ptr = self.unorderedSendPtr(slot, channel_id) orelse return error.InvalidChannel;
                     const rel = try self.getOrCreateReliableState(send_ptr);
-                    const seq = rel.push(data[0..data_len], now_ns) orelse return error.ReliableBufferFull;
-                    channel_mod.encodeHeader(body[0..channel_mod.HEADER_SIZE], channel_id, seq);
+                    seq = rel.push(data[0..data_len], now_ns) orelse return error.ReliableBufferFull;
                 },
             }
 
+            // Write header + user data directly into the outgoing slot (no intermediate buffer).
+            const out = try self.srv.reservePayloadSlot(cid);
+            const body = &out.packet.Payload.body;
+            channel_mod.encodeHeader(body[0..channel_mod.HEADER_SIZE], channel_id, seq);
             @memcpy(body[channel_mod.HEADER_SIZE..body_len], data[0..data_len]);
-            try self.srv.sendPayload(cid, body[0..body_len]);
+            out.packet.Payload.len = @intCast(body_len);
         }
 
         pub fn pollEvent(self: *Self) ?Event {
@@ -347,16 +350,21 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
         }
 
         fn handleAck(self: *Self, slot: usize, channel_id: u8, kind: channel_mod.ChannelKind, seq: u16) void {
-            switch (kind) {
-                .ReliableOrdered => {
-                    const send_ptr = self.orderedSendPtr(slot, channel_id) orelse return;
-                    if (send_ptr.*) |rel| rel.ack(seq);
+            const now_ns = self.srv.getCurrentTime();
+            const sent_at: ?u64 = switch (kind) {
+                .ReliableOrdered => blk: {
+                    const send_ptr = self.orderedSendPtr(slot, channel_id) orelse break :blk null;
+                    break :blk if (send_ptr.*) |rel| rel.ack(seq) else null;
                 },
-                .ReliableUnordered => {
-                    const send_ptr = self.unorderedSendPtr(slot, channel_id) orelse return;
-                    if (send_ptr.*) |rel| rel.ack(seq);
+                .ReliableUnordered => blk: {
+                    const send_ptr = self.unorderedSendPtr(slot, channel_id) orelse break :blk null;
+                    break :blk if (send_ptr.*) |rel| rel.ack(seq) else null;
                 },
-                else => {},
+                else => null,
+            };
+
+            if (sent_at) |t| {
+                self.rtt_state[slot].update(now_ns -| t);
             }
         }
 
@@ -465,6 +473,7 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
             self.ordered_state[slot] = [_]OrderedChannelState{.{}} ** OrderedCount;
             self.unordered_state[slot] = [_]UnorderedChannelState{.{}} ** UnorderedCount;
             self.ul_state[slot] = [_]UlChannelState{.{}} ** UlCount;
+            self.rtt_state[slot] = .{};
         }
 
         fn clearMessages(self: *Self) void {

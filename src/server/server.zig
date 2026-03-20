@@ -123,14 +123,15 @@ pub fn Server(comptime opts: Options) type {
                 }
             }
 
-            i = self.clients.len;
+            // Iterate only connected clients via addr_to_slot (reverse for safe swapRemove).
+            i = self.addr_to_slot.count();
             while (i > 0) {
                 i -= 1;
-
-                const conn = self.clients[i] orelse continue;
+                const slot = self.addr_to_slot.values()[i];
+                const conn = self.clients[slot] orelse continue;
                 if (t -| conn.last_recv <= self.config.client_timeout_ns) continue;
 
-                self.disconnectClient(i) catch {};
+                self.disconnectClient(slot) catch {};
             }
         }
 
@@ -149,6 +150,24 @@ pub fn Server(comptime opts: Options) type {
                 } },
             };
             @memcpy(out.packet.Payload.body[0..body.len], body);
+        }
+
+        /// Reserve an outgoing payload slot for direct writes. Returns the
+        /// writable body slice and the Outgoing entry. Caller must fill the
+        /// body and set the length before the next flush.
+        pub fn reservePayloadSlot(self: *Self, cid: u64) ServerError!*Outgoing {
+            const slot: usize = @intCast(cid);
+            const conn = &(self.clients[slot] orelse return error.UnknownClient);
+            conn.last_send = self.getCurrentTime();
+            const out = self.outgoing.pushBackSlot() orelse return error.IoError;
+            out.* = .{
+                .addr = conn.addr,
+                .packet = .{ .Payload = .{
+                    .len = 0,
+                    .body = undefined,
+                } },
+            };
+            return out;
         }
 
         pub fn pollEvent(self: *Self) ?Event {

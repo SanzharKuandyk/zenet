@@ -331,13 +331,14 @@ test "reliable channel state stores and acks data" {
     const seq = state.push(msg, 0).?;
     try testing.expectEqual(@as(u16, 1), seq);
 
-    // Entry is active
-    try testing.expect(state.entries[0].active);
-    try testing.expectEqual(msg.len, state.entries[0].len);
-    try testing.expectEqualStrings(msg, state.entries[0].data[0..msg.len]);
+    // Entry is active at seq-indexed slot (seq=1 → index 1 % buf_size)
+    const idx = @as(usize, seq) % opts.reliable_buffer;
+    try testing.expect(state.entries[idx].active);
+    try testing.expectEqual(msg.len, state.entries[idx].len);
+    try testing.expectEqualStrings(msg, state.entries[idx].data[0..msg.len]);
 
-    state.ack(seq);
-    try testing.expect(!state.entries[0].active);
+    _ = state.ack(seq);
+    try testing.expect(!state.entries[idx].active);
 
     std.debug.print("\n  PASS: reliable channel state stores and acks data\n", .{});
 }
