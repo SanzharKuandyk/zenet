@@ -2,6 +2,8 @@
 
 > **Experimental** — API is unstable and subject to change.
 
+> **Not an ENet binding.** If you are looking for Zig bindings to the ENet C library, see [znet](https://github.com/connellr023/znet).
+
 Connection-oriented game networking library for Zig. Provides a
 challenge-response handshake (HMAC-SHA256) and a channel system on top of
 unreliable UDP. Inspired by [renet](https://github.com/lucaspoffo/renet).
