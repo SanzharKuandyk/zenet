@@ -175,7 +175,7 @@ test "server disconnects idle client on timeout" {
     std.debug.print("\n  PASS: server disconnects idle client on timeout\n", .{});
 }
 
-test "server sendPayload reaches client as PayloadReceived" {
+test "server sendPayload reaches client as message" {
     var srv = try Srv.init(testing.allocator, serverCfg());
     defer srv.deinit();
     var cli = try Cli.init(clientCfg(9003));
@@ -199,19 +199,21 @@ test "server sendPayload reaches client as PayloadReceived" {
     try srv.sendPayload(cid, &body);
     try relayServerToClient(&srv, &cli);
 
-    const cli_ev = cli.pollEvent().?;
-    try testing.expect(cli_ev == .PayloadReceived);
-    try testing.expectEqual(@as(u16, body.len), cli_ev.PayloadReceived.len);
-    try testing.expectEqual(@as(u8, 0xAB), cli_ev.PayloadReceived.body[0]);
+    const msg = cli.peekMessage().?;
+    const data = cli.payloadData(msg.payload);
+    try testing.expectEqual(@as(usize, body.len), data.len);
+    try testing.expectEqual(@as(u8, 0xAB), data[0]);
+    cli.releasePayload(msg.payload);
+    cli.consumeMessage();
 
-    std.debug.print("\n  PASS: server sendPayload reaches client as PayloadReceived\n", .{});
+    std.debug.print("\n  PASS: server sendPayload reaches client as message\n", .{});
 }
 
 // ---------------------------------------------------------------------------
 // Client sendPayload → Server
 // ---------------------------------------------------------------------------
 
-test "client sendPayload reaches server as PayloadReceived" {
+test "client sendPayload reaches server as message" {
     var srv = try Srv.init(testing.allocator, serverCfg());
     defer srv.deinit();
     var cli = try Cli.init(clientCfg(9004));
@@ -233,12 +235,14 @@ test "client sendPayload reaches server as PayloadReceived" {
     try cli.sendPayload(&body);
     try relayClientToServer(&cli, &srv, client_addr);
 
-    const ev = srv.pollEvent().?;
-    try testing.expect(ev == .PayloadReceived);
-    try testing.expectEqual(@as(u16, body.len), ev.PayloadReceived.payload.len);
-    try testing.expectEqual(@as(u8, 0xCD), ev.PayloadReceived.payload.body[0]);
+    const msg = srv.peekMessage().?;
+    const data = srv.payloadData(msg.payload);
+    try testing.expectEqual(@as(usize, body.len), data.len);
+    try testing.expectEqual(@as(u8, 0xCD), data[0]);
+    srv.releasePayload(msg.payload);
+    srv.consumeMessage();
 
-    std.debug.print("\n  PASS: client sendPayload reaches server as PayloadReceived\n", .{});
+    std.debug.print("\n  PASS: client sendPayload reaches server as message\n", .{});
 }
 
 // ---------------------------------------------------------------------------

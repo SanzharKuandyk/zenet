@@ -6,10 +6,11 @@ const packet_mod = @import("../packet.zig");
 const handshake = @import("../handshake.zig");
 const Options = root.Options;
 const AddressKey = @import("../addr.zig").AddressKey;
-const ServerError = @import("error.zig").ServerError;
-const ServerConfig = @import("config.zig").ServerConfig;
 const RingQueue = @import("../ring_buffer.zig").RingQueue;
 const RecentNonces = @import("../nonce.zig").RecentNonces;
+const PayloadPool = @import("../payload_pool.zig").PayloadPool;
+const ServerError = @import("error.zig").ServerError;
+const ServerConfig = @import("config.zig").ServerConfig;
 
 const CHALLENGE_KEY_SIZE = root.CHALLENGE_KEY_SIZE;
 const SECRET_KEY_SIZE = root.SECRET_KEY_SIZE;
@@ -25,9 +26,12 @@ pub fn Server(comptime opts: Options) type {
     const Conn = connection_mod.Connection(opts);
     const PendingConn = connection_mod.PendingConnection(opts);
     const Pkt = packet_mod.Packet(opts);
+    const Pool = PayloadPool(opts.messages_queue_size, opts.max_payload_size);
 
     return struct {
         const Self = @This();
+
+        pub const PayloadPool = Pool;
 
         pub const Event = union(enum) {
             ClientConnected: struct {
@@ -39,11 +43,11 @@ pub fn Server(comptime opts: Options) type {
                 cid: u64,
                 addr: std.net.Address,
             },
-            PayloadReceived: struct {
-                cid: u64,
-                addr: std.net.Address,
-                payload: packet_mod.Payload(opts),
-            },
+        };
+
+        pub const RawMessageView = struct {
+            cid: u64,
+            payload: Pool.Ref,
         };
 
         pub const Outgoing = struct {
@@ -75,6 +79,8 @@ pub fn Server(comptime opts: Options) type {
 
         outgoing: RingQueue(Outgoing, opts.outgoing_queue_size),
         events: RingQueue(Event, opts.events_queue_size),
+        messages: RingQueue(RawMessageView, opts.messages_queue_size),
+        payload_pool: Pool,
 
         pub fn init(allocator: std.mem.Allocator, config: ServerConfig) !Self {
             const now = try std.time.Instant.now();
@@ -97,6 +103,8 @@ pub fn Server(comptime opts: Options) type {
                 .pending = std.AutoArrayHashMap(AddressKey, PendingConn).init(allocator),
                 .outgoing = .{},
                 .events = .{},
+                .messages = .{},
+                .payload_pool = Pool.init(),
             };
         }
 
@@ -183,6 +191,23 @@ pub fn Server(comptime opts: Options) type {
         pub fn consumeEvent(self: *Self) void {
             // Drop the event returned by peekEvent().
             self.events.advance();
+        }
+
+        pub fn peekMessage(self: *const Self) ?*const RawMessageView {
+            return self.messages.peekFront();
+        }
+
+        pub fn consumeMessage(self: *Self) void {
+            // Advance ring only; does NOT release pool ref.
+            self.messages.advance();
+        }
+
+        pub fn releasePayload(self: *Self, ref: Pool.Ref) void {
+            self.payload_pool.release(ref);
+        }
+
+        pub fn payloadData(self: *const Self, ref: Pool.Ref) []const u8 {
+            return self.payload_pool.slice(ref);
         }
 
         pub fn pollOutgoing(self: *Self) ?Outgoing {
@@ -321,19 +346,12 @@ pub fn Server(comptime opts: Options) type {
                     const slot = self.addr_to_slot.get(AddressKey.fromAddress(addr)) orelse return error.UnknownClient;
                     const conn = &self.clients[slot].?;
                     conn.last_recv = self.getCurrentTime();
-                    const ev = self.events.pushBackSlot() orelse return error.IoError;
-                    ev.* = .{ .PayloadReceived = .{
-                        .cid = conn.cid,
-                        .addr = conn.addr,
-                        .payload = .{
-                            .len = payload.len,
-                            .body = undefined,
-                        },
-                    } };
-                    @memcpy(
-                        ev.PayloadReceived.payload.body[0..payload.len],
-                        payload.body[0..payload.len],
-                    );
+                    // Single copy: wire buffer -> pool.
+                    const ref = self.payload_pool.allocCopy(buffer[packet_mod.PAYLOAD_HEADER_SIZE .. packet_mod.PAYLOAD_HEADER_SIZE + payload.len]) orelse return error.IoError;
+                    if (!self.messages.pushBack(.{ .cid = conn.cid, .payload = ref })) {
+                        self.payload_pool.release(ref);
+                        return error.IoError;
+                    }
                 },
                 .Disconnect => {
                     const key = AddressKey.fromAddress(addr);

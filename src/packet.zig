@@ -12,6 +12,8 @@ const Options = root.Options;
 
 pub const ChallengeToken = handshake.ChallengeToken;
 pub const PROTOCOL_VERSION: u8 = 1;
+/// Byte offset where the payload body begins: [ver:1][kind:1][len:2].
+pub const PAYLOAD_HEADER_SIZE: usize = 4;
 
 // Wire format:
 //   byte 0   = protocol version
@@ -26,7 +28,7 @@ pub const PROTOCOL_VERSION: u8 = 1;
 //   ConnectionAccepted      = [ver:u8][kind:u8]
 //   Payload                 = [ver:u8][kind:u8][len:u16][body:len]
 //   Disconnect              = [ver:u8][kind:u8]
-const PacketKind = enum(u8) {
+pub const PacketKind = enum(u8) {
     ConnectionRequestPlain = 1,
     ConnectionRequestSecure = 2,
     Challenge = 3,
@@ -178,12 +180,8 @@ pub fn deserialize(comptime opts: Options, bytes: []const u8) error{ InvalidPack
             if (len > opts.max_payload_size) return error.InvalidPacket;
             if (bytes.len != 4 + len) return error.InvalidPacket;
 
-            var body: [opts.max_payload_size]u8 = undefined;
-            @memcpy(body[0..len], bytes[4 .. 4 + len]);
-            return .{ .Payload = .{
-                .len = len,
-                .body = body,
-            } };
+            // Body left undefined -- callers use the original wire buffer directly.
+            return .{ .Payload = .{ .len = len, .body = undefined } };
         },
         .Disconnect => {
             if (bytes.len != 2) return error.InvalidPacket;

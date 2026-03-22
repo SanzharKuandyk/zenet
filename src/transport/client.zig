@@ -4,11 +4,10 @@ const validation = @import("../validation/root.zig");
 const packet_mod = @import("../packet.zig");
 const client_mod = @import("../client/client.zig");
 const channel_mod = @import("../channel.zig");
-const payload_pool_mod = @import("../payload_pool.zig");
 const socket_mod = @import("socket.zig");
 const RingQueue = @import("../ring_buffer.zig").RingQueue;
-const UdpSocket = @import("udp.zig").UdpSocket;
 const AddressKey = @import("../addr.zig").AddressKey;
+const UdpSocket = @import("udp.zig").UdpSocket;
 
 pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) type {
     const Socket = if (SocketType == void) UdpSocket else SocketType;
@@ -18,13 +17,10 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
         if (SocketType != void) validation.socket.validate(Socket);
     }
 
-    // TODO: cleanup
     const Cli = client_mod.Client(opts);
     const max_packet_size = packet_mod.maxPacketSize(opts);
     const max_user_data = opts.max_payload_size - channel_mod.HEADER_SIZE;
-
-    const MessagePool = payload_pool_mod.PayloadPool(opts.messages_queue_size, max_user_data);
-    const MessagePayloadRef = MessagePool.Ref;
+    const PoolRef = Cli.PayloadPool.Ref;
 
     const Layout = channel_mod.ChannelLayout(opts.channels);
     const channel_count = Layout.channel_count;
@@ -74,8 +70,7 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
 
         pub const MessageView = struct {
             channel_id: u8,
-            // Bytes live in the transport payload pool until consumeMessage() releases them.
-            payload: MessagePayloadRef,
+            payload: PoolRef,
         };
 
         cli: Cli,
@@ -88,7 +83,6 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
         rtt_state: channel_mod.RttState,
         events: RingQueue(Event, opts.events_queue_size),
         messages: RingQueue(MessageView, opts.messages_queue_size),
-        message_pool: MessagePool,
 
         pub fn init(config: root.ClientConfig, bind_addr: std.net.Address) !Self {
             const socket = try Socket.open(bind_addr);
@@ -111,7 +105,6 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
                 .rtt_state = .{},
                 .events = .{},
                 .messages = .{},
-                .message_pool = MessagePool.init(),
             };
         }
 
@@ -139,7 +132,7 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
             }
 
             while (self.cli.peekEvent()) |ev| {
-                switch (std.meta.activeTag(ev.*)) {
+                switch (ev.*) {
                     .Connected => {
                         self.resetChannelState();
                         _ = self.events.pushBack(.Connected);
@@ -148,12 +141,15 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
                         self.resetChannelState();
                         _ = self.events.pushBack(.Disconnected);
                     },
-                    .PayloadReceived => {
-                        const payload = &ev.PayloadReceived;
-                        self.handleIncoming(payload.body[0..payload.len]);
-                    },
                 }
                 self.cli.consumeEvent();
+            }
+
+            // Drain SM message queue (payloads from wire -> pool).
+            while (self.cli.peekMessage()) |raw| {
+                const ref = raw.payload;
+                self.cli.consumeMessage();
+                self.handleIncoming(ref);
             }
 
             self.flushOutgoing();
@@ -173,28 +169,42 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
             }
         }
 
-        fn handleIncoming(self: *Self, body: []const u8) void {
-            const hdr = channel_mod.Header.decode(body) orelse return;
-            if (hdr.channel_id >= channel_count) return;
+        fn handleIncoming(self: *Self, ref: PoolRef) void {
+            const body = self.cli.payloadData(ref);
+            const hdr = channel_mod.Header.decode(body) orelse {
+                self.cli.releasePayload(ref);
+                return;
+            };
+            if (hdr.channel_id >= channel_count) {
+                self.cli.releasePayload(ref);
+                return;
+            }
             const ch_idx = hdr.channel_id;
             const kind = Layout.kind(ch_idx);
 
             if (hdr.is_ack) {
                 self.handleAck(ch_idx, kind, hdr.seq);
+                self.cli.releasePayload(ref);
                 return;
             }
 
             switch (kind) {
                 .Unreliable => {},
-                .UnreliableLatest => if (!self.acceptLatest(ch_idx, hdr.seq)) return,
-                .ReliableOrdered => {
-                    self.handleReliableOrdered(ch_idx, hdr.seq, body);
+                .UnreliableLatest => if (!self.acceptLatest(ch_idx, hdr.seq)) {
+                    self.cli.releasePayload(ref);
                     return;
                 },
-                .ReliableUnordered => if (!self.acceptReliableUnordered(ch_idx, hdr.seq)) return,
+                .ReliableOrdered => {
+                    self.handleReliableOrdered(ch_idx, hdr.seq, ref);
+                    return;
+                },
+                .ReliableUnordered => if (!self.acceptReliableUnordered(ch_idx, hdr.seq)) {
+                    self.cli.releasePayload(ref);
+                    return;
+                },
             }
 
-            self.enqueueMessage(@intCast(ch_idx), body);
+            self.enqueueMessage(@intCast(ch_idx), ref);
         }
 
         fn retransmitReliable(self: *Self, now_ns: u64) void {
@@ -301,14 +311,12 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
         }
 
         pub fn messageData(self: *const Self, msg: *const MessageView) []const u8 {
-            return self.message_pool.slice(msg.payload);
+            return self.cli.payloadData(msg.payload)[channel_mod.HEADER_SIZE..];
         }
 
         pub fn consumeMessage(self: *Self) void {
-            // Drop the message returned by peekMessage() and release its pooled bytes.
             const msg = self.messages.peekFront() orelse return;
-            // Releasing here makes peekMessage() the zero-copy path and keeps pollMessage() simple.
-            self.message_pool.release(msg.payload);
+            self.cli.releasePayload(msg.payload);
             self.messages.advance();
         }
 
@@ -346,22 +354,34 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
             return recv.accept(seq);
         }
 
-        fn handleReliableOrdered(self: *Self, channel_id: u8, seq: u16, body: []const u8) void {
-            const recv = self.orderedRecvState(channel_id) orelse return;
-            const action = recv.receive(self.allocator, seq, body) catch return;
+        fn handleReliableOrdered(self: *Self, channel_id: u8, seq: u16, ref: PoolRef) void {
+            const body = self.cli.payloadData(ref);
+            const recv = self.orderedRecvState(channel_id) orelse {
+                self.cli.releasePayload(ref);
+                return;
+            };
+            const action = recv.receive(self.allocator, seq, body) catch {
+                self.cli.releasePayload(ref);
+                return;
+            };
             switch (action) {
-                .drop => return,
+                .drop => {
+                    self.cli.releasePayload(ref);
+                    return;
+                },
                 .ack_only => {
                     self.sendAck(channel_id, seq);
+                    self.cli.releasePayload(ref);
                     return;
                 },
                 .deliver => {
                     self.sendAck(channel_id, seq);
-                    self.enqueueMessage(channel_id, body);
+                    self.enqueueMessage(channel_id, ref);
 
-                    // The missing packet arrived, so any buffered followers may now be deliverable too.
+                    // Buffered followers: allocate new pool refs from SM pool.
                     while (recv.peekReady()) |ready_body| {
-                        self.enqueueMessage(channel_id, ready_body);
+                        const future_ref = self.cli.payload_pool.allocCopy(ready_body) orelse break;
+                        self.enqueueMessage(channel_id, future_ref);
                         recv.consumeReady();
                     }
                 },
@@ -375,14 +395,12 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
             return action == .deliver;
         }
 
-        fn enqueueMessage(self: *Self, channel_id: u8, body: []const u8) void {
-            const user = body[channel_mod.HEADER_SIZE..];
-            const payload = self.message_pool.allocCopy(user) orelse return;
+        fn enqueueMessage(self: *Self, channel_id: u8, ref: PoolRef) void {
             if (!self.messages.pushBack(.{
                 .channel_id = channel_id,
-                .payload = payload,
+                .payload = ref,
             })) {
-                self.message_pool.release(payload);
+                self.cli.releasePayload(ref);
             }
         }
 
@@ -428,7 +446,7 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
 
         fn clearMessages(self: *Self) void {
             while (self.messages.peekFront()) |msg| {
-                self.message_pool.release(msg.payload);
+                self.cli.releasePayload(msg.payload);
                 self.messages.advance();
             }
         }

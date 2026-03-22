@@ -2,30 +2,34 @@ const std = @import("std");
 const root = @import("../root.zig");
 const validation = @import("../validation/root.zig");
 const packet_mod = @import("../packet.zig");
-const handshake = @import("../handshake.zig");
 const Options = root.Options;
+const RingQueue = @import("../ring_buffer.zig").RingQueue;
+const PayloadPool = @import("../payload_pool.zig").PayloadPool;
 const ClientError = @import("error.zig").ClientError;
 const ClientConfig = @import("config.zig").ClientConfig;
-const RingQueue = @import("../ring_buffer.zig").RingQueue;
+const DefaultConnectToken = @import("../handshake.zig").DefaultConnectToken;
 
 pub fn Client(comptime opts: Options) type {
     comptime validation.options.validate(opts);
 
     const Pkt = packet_mod.Packet(opts);
+    const Pool = PayloadPool(opts.messages_queue_size, opts.max_payload_size);
     const ConnectTokenType = if (opts.ConnectToken == void)
-        handshake.DefaultConnectToken(opts.user_data_size, opts.max_token_addresses)
+        DefaultConnectToken(opts.user_data_size, opts.max_token_addresses)
     else
         opts.ConnectToken;
 
     return struct {
         const Self = @This();
 
+        pub const PayloadPool = Pool;
+
         pub const State = enum { Disconnected, SendingRequest, SendingResponse, Connected };
 
-        pub const Event = union(enum) {
-            Connected,
-            Disconnected,
-            PayloadReceived: packet_mod.Payload(opts),
+        pub const Event = enum { Connected, Disconnected };
+
+        pub const RawMessageView = struct {
+            payload: Pool.Ref,
         };
 
         pub const Outgoing = struct {
@@ -49,6 +53,8 @@ pub fn Client(comptime opts: Options) type {
 
         outgoing: RingQueue(Outgoing, opts.outgoing_queue_size),
         events: RingQueue(Event, opts.events_queue_size),
+        messages: RingQueue(RawMessageView, opts.messages_queue_size),
+        payload_pool: Pool,
 
         pub fn init(config: ClientConfig) !Self {
             const now = try std.time.Instant.now();
@@ -66,6 +72,8 @@ pub fn Client(comptime opts: Options) type {
                 .current_time = now,
                 .outgoing = .{},
                 .events = .{},
+                .messages = .{},
+                .payload_pool = Pool.init(),
             };
         }
 
@@ -146,12 +154,12 @@ pub fn Client(comptime opts: Options) type {
                 .Payload => |payload| {
                     if (self.state != .Connected) return error.InvalidPacket;
                     self.last_recv = self.getCurrentTime();
-                    const ev = self.events.pushBackSlot() orelse return error.IoError;
-                    ev.* = .{ .PayloadReceived = .{
-                        .len = payload.len,
-                        .body = undefined,
-                    } };
-                    @memcpy(ev.PayloadReceived.body[0..payload.len], payload.body[0..payload.len]);
+                    // Single copy: wire buffer -> pool.
+                    const ref = self.payload_pool.allocCopy(buffer[packet_mod.PAYLOAD_HEADER_SIZE .. packet_mod.PAYLOAD_HEADER_SIZE + payload.len]) orelse return error.IoError;
+                    if (!self.messages.pushBack(.{ .payload = ref })) {
+                        self.payload_pool.release(ref);
+                        return error.IoError;
+                    }
                 },
                 .Disconnect => {
                     if (self.state != .Connected) return error.InvalidPacket;
@@ -230,6 +238,23 @@ pub fn Client(comptime opts: Options) type {
         pub fn consumeOutgoing(self: *Self) void {
             // Drop the packet returned by peekOutgoing().
             self.outgoing.advance();
+        }
+
+        pub fn peekMessage(self: *const Self) ?*const RawMessageView {
+            return self.messages.peekFront();
+        }
+
+        pub fn consumeMessage(self: *Self) void {
+            // Advance ring only; does NOT release pool ref.
+            self.messages.advance();
+        }
+
+        pub fn releasePayload(self: *Self, ref: Pool.Ref) void {
+            self.payload_pool.release(ref);
+        }
+
+        pub fn payloadData(self: *const Self, ref: Pool.Ref) []const u8 {
+            return self.payload_pool.slice(ref);
         }
 
         fn updateHandshake(self: *Self, now: u64) void {
