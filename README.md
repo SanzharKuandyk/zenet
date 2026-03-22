@@ -487,17 +487,27 @@ while (srv.pollOutgoing()) |out| {
     udp_send(out.addr, out.packet);
 }
 
-// drain events — zero-copy peek/consume pattern
+// drain lifecycle events — zero-copy peek/consume pattern
 while (srv.peekEvent()) |ev| {
-    switch (std.meta.activeTag(ev.*)) {
-        .ClientConnected    => { _ = ev.ClientConnected.cid; },
-        .ClientDisconnected => { _ = ev.ClientDisconnected.cid; },
-        .PayloadReceived    => { _ = ev.PayloadReceived.payload.body; },
+    switch (ev.*) {
+        .ClientConnected    => |e| { _ = e.cid; },
+        .ClientDisconnected => |e| { _ = e.cid; },
     }
     srv.consumeEvent();
 }
 // or copy-out variant
 while (srv.pollEvent()) |ev| { ... }
+
+// drain inbound messages — zero-copy peek/consume pattern
+while (srv.peekMessage()) |msg| {
+    // msg : *const RawMessageView — points into ring buffer
+    // msg.cid     : u64
+    // msg.payload : Pool.Ref  — opaque handle, use payloadData() to read
+    const data = srv.payloadData(msg.payload);
+    _ = data; // []const u8 — raw payload bytes (includes 3-byte channel header)
+    srv.releasePayload(msg.payload);
+    srv.consumeMessage(); // advance ring only, does NOT release
+}
 
 // send a raw payload body to a connected client (copies into outgoing ring)
 try srv.sendPayload(cid, payload_body); // payload_body: []const u8
@@ -530,12 +540,21 @@ while (cli.peekOutgoing()) |out| {
 }
 
 while (cli.peekEvent()) |ev| {
-    switch (std.meta.activeTag(ev.*)) {
-        .Connected       => {},
-        .Disconnected    => {},
-        .PayloadReceived => { _ = ev.PayloadReceived.body; },
+    switch (ev.*) {
+        .Connected    => {},
+        .Disconnected => {},
     }
     cli.consumeEvent();
+}
+
+// drain inbound messages — zero-copy peek/consume pattern
+while (cli.peekMessage()) |msg| {
+    // msg : *const RawMessageView — points into ring buffer
+    // msg.payload : Pool.Ref  — opaque handle, use payloadData() to read
+    const data = cli.payloadData(msg.payload);
+    _ = data; // []const u8 — raw payload bytes (includes 3-byte channel header)
+    cli.releasePayload(msg.payload);
+    cli.consumeMessage(); // advance ring only, does NOT release
 }
 
 // send a raw payload body (copies into outgoing ring)
@@ -604,14 +623,16 @@ src/
 
   server/
     server.zig          Server state machine (handlePacket, sendPayload,
-                        reservePayloadSlot, peekOutgoing/consumeOutgoing, …)
+                        reservePayloadSlot, peekOutgoing/consumeOutgoing,
+                        peekMessage/consumeMessage/releasePayload/payloadData, …)
     config.zig          ServerConfig
     connection.zig      per-client connection state
     error.zig           ServerError
 
   client/
     client.zig          Client state machine (handlePacket, sendPayload,
-                        reservePayloadSlot, peekOutgoing/consumeOutgoing, …)
+                        reservePayloadSlot, peekOutgoing/consumeOutgoing,
+                        peekMessage/consumeMessage/releasePayload/payloadData, …)
     config.zig          ClientConfig
     error.zig           ClientError
 
