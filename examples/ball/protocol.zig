@@ -10,12 +10,10 @@ pub const net_opts: zenet.Options = .{
     // Session/control data should be reliable and ordered.
     // High-frequency position updates should only keep the newest value.
     .channels = &.{
-        .ReliableOrdered, // ch 0 — session events (assign, remove)
-        .UnreliableLatest, // ch 1 — ball positions
-        .Unreliable, // ch 2 — chat: fire-and-forget, lowest overhead
+        .{ .kind = .ReliableOrdered }, // ch 0 — session events (assign, remove)
+        .{ .kind = .UnreliableLatest }, // ch 1 — ball positions
+        .{ .kind = .Unreliable }, // ch 2 — chat: fire-and-forget, lowest overhead
     },
-    // Max unACKed reliable messages in-flight per channel per peer.
-    .reliable_buffer = 64,
     .reliable_resend_ns = 80 * std.time.ns_per_ms,
     .messages_queue_size = 128,
     .events_queue_size = 16,

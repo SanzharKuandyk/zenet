@@ -6,6 +6,7 @@ pub const CHALLENGE_KEY_SIZE = 32;
 pub const handshake = @import("handshake.zig");
 
 pub const ChannelKind = @import("channel.zig").ChannelKind;
+pub const ChannelConfig = @import("channel.zig").ChannelConfig;
 
 /// Single comptime config shared by both Server and Client.
 /// Both sides must use identical options — the wire format depends on it.
@@ -24,17 +25,11 @@ pub const Options = struct {
     max_payload_size: usize = 1024,
     /// User-provided ConnectToken type. `void` = use zenet's built-in default.
     ConnectToken: type = void,
-    /// Channel configuration for TransportServer/TransportClient.
-    /// Index = channel_id. At least one channel required.
-    channels: []const ChannelKind = &.{.Unreliable},
-    /// How many unACKed messages each reliable ordered/unordered channel can buffer per peer.
-    reliable_buffer: usize = 64,
+    /// Per-channel configuration. Index = channel_id. At least one channel required.
+    /// Use `ChannelConfig{ .kind = .ReliableOrdered, .reliable_buffer = 32, ... }`.
+    channels: []const ChannelConfig = &.{.{ .kind = .Unreliable }},
     /// Nanoseconds before an unACKed reliable message is resent.
     reliable_resend_ns: u64 = 100 * std.time.ns_per_ms,
-    /// Maximum number of packets of the future packet buffer in ReliableOrdered.
-    /// When N+1 packet is expected and N+2 packet came,
-    /// the latter will be stored instead of being dropped if > 0.
-    reliable_ordered_recv_window: usize = 32,
     /// Capacity of the incoming message queue in TransportServer/TransportClient.
     /// Sized separately from events_queue_size because messages arrive far more often.
     messages_queue_size: usize = 256,

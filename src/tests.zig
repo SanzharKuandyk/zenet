@@ -23,8 +23,12 @@ const opts: zenet.Options = .{
     .events_queue_size = 32,
     .user_data_size = 16,
     .max_payload_size = 64,
-    .channels = &.{ .Unreliable, .UnreliableLatest, .ReliableOrdered, .ReliableUnordered },
-    .reliable_buffer = 8,
+    .channels = &.{
+        .{ .kind = .Unreliable },
+        .{ .kind = .UnreliableLatest },
+        .{ .kind = .ReliableOrdered, .reliable_buffer = 8 },
+        .{ .kind = .ReliableUnordered, .reliable_buffer = 8 },
+    },
     .reliable_resend_ns = 100 * std.time.ns_per_ms,
 };
 
@@ -327,8 +331,9 @@ test "UnreliableLatest drops older sequence via state machine relay" {
 // ---------------------------------------------------------------------------
 
 test "reliable channel state stores and acks data" {
+    const buf_size = 8; // matches reliable_buffer in opts channels above
     const max_ud = opts.max_payload_size - channel_mod.HEADER_SIZE;
-    const R = channel_mod.ReliableState(opts.reliable_buffer, max_ud);
+    const R = channel_mod.ReliableState(buf_size, max_ud);
     var state: R = .{};
 
     const msg = "important data";
@@ -336,7 +341,7 @@ test "reliable channel state stores and acks data" {
     try testing.expectEqual(@as(u16, 1), seq);
 
     // Entry is active at seq-indexed slot (seq=1 → index 1 % buf_size)
-    const idx = @as(usize, seq) % opts.reliable_buffer;
+    const idx = @as(usize, seq) % buf_size;
     try testing.expect(state.entries[idx].active);
     try testing.expectEqual(msg.len, state.entries[idx].len);
     try testing.expectEqualStrings(msg, state.entries[idx].data[0..msg.len]);
@@ -638,4 +643,88 @@ test "transport loopback: reliable retransmit after lost ack does not redeliver"
     srv.tick();
 
     try testing.expect(srv.pollMessage() == null);
+}
+
+// ---------------------------------------------------------------------------
+// Fragmentation
+// ---------------------------------------------------------------------------
+
+const frag_opts: zenet.Options = .{
+    .max_clients = 4,
+    .max_pending_clients = 8,
+    .nonce_window = 8,
+    .outgoing_queue_size = 128,
+    .events_queue_size = 32,
+    .messages_queue_size = 64,
+    .user_data_size = 16,
+    // max_payload_size = 64, fragment_size = 16:
+    //   9 (FRAG_HEADER_SIZE) + 16 = 25 <= 64 ✓
+    //   a 40-byte message needs ceil(40/16) = 3 fragments
+    .max_payload_size = 64,
+    .channels = &.{
+        .{ .kind = .ReliableOrdered, .reliable_buffer = 32, .fragment_size = 16 },
+    },
+    .reliable_resend_ns = 100 * std.time.ns_per_ms,
+};
+
+test "transport loopback: fragmented ReliableOrdered channel assembles correctly" {
+    const FSrv = TransportServer(frag_opts, LoopbackSocket);
+    const FCli = TransportClient(frag_opts, LoopbackSocket);
+
+    const faddr_srv = std.net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, 21000);
+    const faddr_cli = std.net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, 21001);
+
+    var fpair: LoopbackSocket.Pair = .{};
+
+    var fsrv = try FSrv.initWithSocket(
+        testing.allocator,
+        zenet.ServerConfig.init(1, 5 * std.time.ns_per_s, 30 * std.time.ns_per_s, &.{}, false, [_]u8{0} ** 32, null),
+        fpair.serverSocket(faddr_srv),
+    );
+    defer fsrv.deinit();
+
+    var fcli = try FCli.initWithSocket(
+        .{ .protocol_id = 1, .server_addr = faddr_srv, .connect_timeout_ns = 5 * std.time.ns_per_s, .timeout_ns = 30 * std.time.ns_per_s },
+        fpair.clientSocket(faddr_cli),
+    );
+    defer fcli.deinit();
+
+    try fcli.connect();
+
+    // Handshake
+    var cid: u64 = 0;
+    for (0..20) |_| {
+        fcli.tick();
+        fsrv.tick();
+        if (fsrv.pollEvent()) |ev| {
+            cid = ev.ClientConnected.cid;
+            break;
+        }
+    }
+    _ = fcli.pollEvent(); // consume Connected
+
+    // Build a 40-byte message: bytes 0,1,2,...,39
+    // fragment_size=16 → 3 fragments (16+16+8 bytes)
+    var send_data: [40]u8 = undefined;
+    for (0..40) |i| send_data[i] = @intCast(i);
+
+    try fsrv.sendOnChannel(cid, 0, &send_data);
+
+    // Tick enough times to deliver all 3 fragments and their ACKs.
+    for (0..10) |_| {
+        fsrv.tick();
+        fcli.tick();
+    }
+
+    const msg = fcli.peekMessage();
+    try testing.expect(msg != null);
+    const data = fcli.messageData(msg.?);
+    try testing.expectEqual(@as(usize, 40), data.len);
+    for (0..40) |i| {
+        try testing.expectEqual(@as(u8, @intCast(i)), data[i]);
+    }
+    fcli.consumeMessage();
+    try testing.expect(fcli.peekMessage() == null);
+
+    std.debug.print("\n  PASS: transport loopback: fragmented ReliableOrdered channel assembles correctly\n", .{});
 }

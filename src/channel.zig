@@ -8,26 +8,51 @@ pub const ChannelKind = enum {
     ReliableUnordered,
 };
 
+/// Per-channel configuration. Use as elements of `Options.channels`.
+pub const ChannelConfig = struct {
+    kind: ChannelKind,
+    /// Unacked send slots per connection (ReliableOrdered / ReliableUnordered send side).
+    reliable_buffer: usize = 64,
+    /// Future-packet recv buffer depth (ReliableOrdered recv side). 0 = no buffering.
+    ordered_recv_window: usize = 32,
+    /// Dedup sliding window size (ReliableUnordered recv side).
+    unordered_recv_window: usize = 64,
+    /// If set, this channel transparently fragments messages into chunks of at most this
+    /// many user-data bytes per fragment.  Must satisfy:
+    ///   `FRAG_HEADER_SIZE + fragment_size <= opts.max_payload_size`
+    /// UnreliableLatest channels do not support fragmentation.
+    fragment_size: ?usize = null,
+};
+
 /// Bytes consumed from payload body by the channel framing layer.
 pub const HEADER_SIZE: usize = 3; // channel_id(1) + seq(2)
+
+/// Extra bytes prepended after the regular header for fragmented channels:
+///   msg_id(2) + frag_count(1) + frag_index(1) + total_size(2)
+pub const FRAG_EXTRA_SIZE: usize = 6;
+/// Total channel header size for fragmented channels.
+pub const FRAG_HEADER_SIZE: usize = HEADER_SIZE + FRAG_EXTRA_SIZE;
 
 /// High bit of channel_id byte signals an ACK-only packet.
 pub const ACK_FLAG: u8 = 0x80;
 
 pub const ChannelInfo = struct {
-    kind: ChannelKind,
-    // optional: not used by Unreliable kind
+    config: ChannelConfig,
+    /// Compact index within the channel kind (null for plain Unreliable).
     compact_index: ?u8,
+    /// Compact index into the fragmented-channel state array; null when fragment_size == null.
+    frag_index: ?u8,
 };
 
 /// Maps the public wire-level channel_id to a compact index for each channel kind.
 /// Example: if channels 1 and 3 are ReliableOrdered, they become ordered indexes 0 and 1.
-pub fn ChannelLayout(comptime channels: []const ChannelKind) type {
+pub fn ChannelLayout(comptime channels: []const ChannelConfig) type {
     const LayoutData = struct {
         infos: [channels.len]ChannelInfo,
         ordered_count: usize,
         unordered_count: usize,
         latest_count: usize,
+        frag_count: usize,
     };
 
     const data = comptime blk: {
@@ -35,31 +60,42 @@ pub fn ChannelLayout(comptime channels: []const ChannelKind) type {
         var ordered_count: u8 = 0;
         var unordered_count: u8 = 0;
         var latest_count: u8 = 0;
+        var frag_count: u8 = 0;
 
-        for (channels, 0..) |kind, ch_idx| {
-            switch (kind) {
+        for (channels, 0..) |ch, ch_idx| {
+            const fi: ?u8 = if (ch.fragment_size != null) fi_blk: {
+                const idx = frag_count;
+                frag_count += 1;
+                break :fi_blk idx;
+            } else null;
+
+            switch (ch.kind) {
                 .Unreliable => infos[ch_idx] = .{
-                    .kind = kind,
+                    .config = ch,
                     .compact_index = null,
+                    .frag_index = fi,
                 },
                 .UnreliableLatest => {
                     infos[ch_idx] = .{
-                        .kind = kind,
+                        .config = ch,
                         .compact_index = latest_count,
+                        .frag_index = fi,
                     };
                     latest_count += 1;
                 },
                 .ReliableOrdered => {
                     infos[ch_idx] = .{
-                        .kind = kind,
+                        .config = ch,
                         .compact_index = ordered_count,
+                        .frag_index = fi,
                     };
                     ordered_count += 1;
                 },
                 .ReliableUnordered => {
                     infos[ch_idx] = .{
-                        .kind = kind,
+                        .config = ch,
                         .compact_index = unordered_count,
+                        .frag_index = fi,
                     };
                     unordered_count += 1;
                 },
@@ -71,6 +107,7 @@ pub fn ChannelLayout(comptime channels: []const ChannelKind) type {
             .ordered_count = ordered_count,
             .unordered_count = unordered_count,
             .latest_count = latest_count,
+            .frag_count = frag_count,
         };
     };
 
@@ -80,9 +117,15 @@ pub fn ChannelLayout(comptime channels: []const ChannelKind) type {
         pub const ordered_count = data.ordered_count;
         pub const unordered_count = data.unordered_count;
         pub const latest_count = data.latest_count;
+        /// Number of channels with `fragment_size != null`.
+        pub const frag_count = data.frag_count;
 
         pub fn kind(channel_id: u8) ChannelKind {
-            return infos[channel_id].kind;
+            return infos[channel_id].config.kind;
+        }
+
+        pub fn config(channel_id: u8) ChannelConfig {
+            return infos[channel_id].config;
         }
 
         pub fn compactIndex(channel_id: u8) ?u8 {
@@ -106,6 +149,12 @@ pub fn ChannelLayout(comptime channels: []const ChannelKind) type {
             if (kind(channel_id) != .UnreliableLatest) return null;
             return compactIndex(channel_id);
         }
+
+        /// Returns the compact fragmentation index for `channel_id`, or null if the
+        /// channel does not have `fragment_size` set.
+        pub fn fragIndex(channel_id: u8) ?u8 {
+            return infos[channel_id].frag_index;
+        }
     };
 }
 
@@ -119,6 +168,21 @@ pub fn encodeAck(buf: *[HEADER_SIZE]u8, channel_id: u8, acked_seq: u16) void {
     std.mem.writeInt(u16, buf[1..3], acked_seq, .big);
 }
 
+/// Encode the 6-byte frag-extra header that follows the regular channel header on
+/// fragmented channels.
+pub fn encodeFragExtra(
+    buf: *[FRAG_EXTRA_SIZE]u8,
+    msg_id: u16,
+    frag_count: u8,
+    frag_index: u8,
+    total_size: u16,
+) void {
+    std.mem.writeInt(u16, buf[0..2], msg_id, .big);
+    buf[2] = frag_count;
+    buf[3] = frag_index;
+    std.mem.writeInt(u16, buf[4..6], total_size, .big);
+}
+
 pub const Header = struct {
     channel_id: u8,
     seq: u16,
@@ -130,6 +194,24 @@ pub const Header = struct {
             .channel_id = buf[0] & ~ACK_FLAG,
             .seq = std.mem.readInt(u16, buf[1..3], .big),
             .is_ack = (buf[0] & ACK_FLAG) != 0,
+        };
+    }
+};
+
+/// Decoded frag-extra header (bytes 3–8 of the fragmented channel payload).
+pub const FragExtra = struct {
+    msg_id: u16,
+    frag_count: u8,
+    frag_index: u8,
+    total_size: u16,
+
+    pub fn decode(buf: []const u8) ?FragExtra {
+        if (buf.len < FRAG_EXTRA_SIZE) return null;
+        return .{
+            .msg_id = std.mem.readInt(u16, buf[0..2], .big),
+            .frag_count = buf[2],
+            .frag_index = buf[3],
+            .total_size = std.mem.readInt(u16, buf[4..6], .big),
         };
     }
 };
@@ -468,6 +550,17 @@ test "Header decode too short" {
     const buf = [_]u8{0};
     try testing.expect(Header.decode(&buf) == null);
     std.debug.print("\n  PASS: Header decode too short\n", .{});
+}
+
+test "FragExtra encode/decode round-trip" {
+    var buf: [FRAG_EXTRA_SIZE]u8 = undefined;
+    encodeFragExtra(&buf, 42, 5, 3, 1000);
+    const fe = FragExtra.decode(&buf).?;
+    try testing.expectEqual(@as(u16, 42), fe.msg_id);
+    try testing.expectEqual(@as(u8, 5), fe.frag_count);
+    try testing.expectEqual(@as(u8, 3), fe.frag_index);
+    try testing.expectEqual(@as(u16, 1000), fe.total_size);
+    std.debug.print("\n  PASS: FragExtra encode/decode round-trip\n", .{});
 }
 
 test "ReliableState push and ack" {

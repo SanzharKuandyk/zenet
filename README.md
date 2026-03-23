@@ -50,6 +50,7 @@ Controls: `W`/`S` to move · `T` to chat · `Space` to ready up after a round
 - [Quick start](#quick-start)
 - [Options](#options)
 - [Channels](#channels)
+  - [Fragmentation](#fragmentation)
 - [TransportServer / TransportClient](#transportserver--transportclient)
 - [Custom socket](#custom-socket)
 - [Secure connections / ConnectToken](#secure-connections--connecttoken)
@@ -66,9 +67,14 @@ const zenet = @import("zenet");
 const std   = @import("std");
 
 const opts: zenet.Options = .{
-    .max_clients     = 64,
+    .max_clients      = 64,
     .max_payload_size = 512,
-    .channels        = &.{ .Unreliable, .UnreliableLatest, .ReliableOrdered, .ReliableUnordered },
+    .channels         = &.{
+        .{ .kind = .Unreliable },
+        .{ .kind = .UnreliableLatest },
+        .{ .kind = .ReliableOrdered },
+        .{ .kind = .ReliableUnordered },
+    },
 };
 
 // --- server ---
@@ -150,16 +156,19 @@ const opts: zenet.Options = .{
     .max_pending_clients  = null,  // defaults to max_clients * 2; must be power of 2
 
     // Wire format
-    .max_payload_size     = 1024,  // bytes per payload (includes 3-byte channel header)
+    .max_payload_size     = 1024,  // bytes per payload (includes channel header)
     .user_data_size       = 256,   // bytes carried in ConnectToken.user_data
 
     // Channels  (index = channel_id passed to sendOnChannel)
-    .channels             = &.{ .Unreliable, .UnreliableLatest, .ReliableOrdered, .ReliableUnordered },
+    .channels             = &.{
+        .{ .kind = .Unreliable },
+        .{ .kind = .UnreliableLatest },
+        .{ .kind = .ReliableOrdered,   .reliable_buffer = 64, .ordered_recv_window = 32 },
+        .{ .kind = .ReliableUnordered, .reliable_buffer = 64, .unordered_recv_window = 64 },
+    },
 
-    // Reliable channel tuning
-    .reliable_buffer      = 64,    // unACKed send slots per channel per peer
+    // Global reliable timing
     .reliable_resend_ns   = 100 * std.time.ns_per_ms,  // minimum retransmit interval (floor for RTT-based RTO)
-    .reliable_ordered_recv_window = 32, // future-packet buffer depth for ReliableOrdered
 
     // Queue sizes
     .outgoing_queue_size  = 256,
@@ -185,30 +194,54 @@ retransmits are avoided.
 Every message is sent on a numbered channel (index into `opts.channels`).
 Four kinds are available:
 
-| Kind                 | Delivery         | Ordering | Use for                            |
-|----------------------|------------------|----------|------------------------------------|
-| `Unreliable`         | fire-and-forget  | none     | audio, debug overlays              |
-| `UnreliableLatest`   | fire-and-forget  | drops older | positions, orientations         |
-| `ReliableOrdered`    | ACK + retransmit | in order | game events, match flow            |
-| `ReliableUnordered`  | ACK + retransmit | none     | idempotent reliable notifications  |
+| Kind                 | Delivery         | Ordering    | Use for                            |
+|----------------------|------------------|-------------|------------------------------------|
+| `Unreliable`         | fire-and-forget  | none        | audio, debug overlays              |
+| `UnreliableLatest`   | fire-and-forget  | drops older | positions, orientations            |
+| `ReliableOrdered`    | ACK + retransmit | in order    | game events, match flow            |
+| `ReliableUnordered`  | ACK + retransmit | none        | idempotent reliable notifications  |
+
+Each channel is configured with a `ChannelConfig` struct:
 
 ```zig
-// opts.channels = &.{ .Unreliable, .UnreliableLatest, .ReliableOrdered, .ReliableUnordered }
-//                         0               1                 2                   3
+.channels = &.{
+    // channel 0 — minimal unreliable
+    .{ .kind = .Unreliable },
 
-// send from client
+    // channel 1 — latest-only positions
+    .{ .kind = .UnreliableLatest },
+
+    // channel 2 — ordered events; deep recv window for jittery links
+    .{ .kind = .ReliableOrdered, .reliable_buffer = 32, .ordered_recv_window = 16 },
+
+    // channel 3 — bulk world state; fragmented so messages can exceed max_payload_size
+    .{ .kind = .ReliableOrdered, .reliable_buffer = 64, .fragment_size = 512 },
+},
+```
+
+`ChannelConfig` fields (all optional, shown with defaults):
+
+| Field                  | Applies to                        | Default | Description |
+|------------------------|-----------------------------------|---------|-------------|
+| `kind`                 | all                               | —       | Channel delivery kind (required) |
+| `reliable_buffer`      | `ReliableOrdered`, `ReliableUnordered` | `64` | Unacked send slots per peer |
+| `ordered_recv_window`  | `ReliableOrdered`                 | `32`    | Future-packet buffer depth; `0` = no buffering |
+| `unordered_recv_window`| `ReliableUnordered`               | `64`    | Dedup sliding-window size |
+| `fragment_size`        | all except `UnreliableLatest`     | `null`  | Enable fragmentation; see below |
+
+```zig
+// send and receive
 try cli.sendOnChannel(0, "fire-and-forget");
 try cli.sendOnChannel(1, &std.mem.toBytes(player_position));
-try cli.sendOnChannel(2, "must arrive");
-try cli.sendOnChannel(3, "must arrive, order does not matter");
+try cli.sendOnChannel(2, "must arrive in order");
+try cli.sendOnChannel(3, large_world_state_bytes); // fragmented transparently
 
-// receive on server
 while (srv.peekMessage()) |msg| {
     switch (msg.channel_id) {
         0 => ..., // Unreliable
         1 => ..., // UnreliableLatest — older packets already dropped
         2 => ..., // ReliableOrdered
-        3 => ..., // ReliableUnordered
+        3 => ..., // assembled from fragments — messageData() returns full slice
         else => {},
     }
     srv.consumeMessage();
@@ -218,6 +251,46 @@ while (srv.peekMessage()) |msg| {
 `sendOnChannel` returns `error.ReliableBufferFull` when all `reliable_buffer`
 slots are occupied by unACKed messages for that peer. Back off and retry on the
 next tick.
+
+### Fragmentation
+
+Set `fragment_size` on any channel (except `UnreliableLatest`) to transparently
+split messages larger than a single UDP payload. The constraint is:
+
+```
+FRAG_HEADER_SIZE (9) + fragment_size ≤ max_payload_size
+```
+
+Each fragment is sent as a separate packet with its own sequence number; on
+reliable channels each fragment is individually ACKed and retransmitted. The
+receiver reassembles them and delivers the complete message to `peekMessage` /
+`messageData` — the assembled buffer is heap-allocated and freed when you call
+`consumeMessage`.
+
+```zig
+const opts: zenet.Options = .{
+    .max_payload_size = 256,
+    .channels = &.{
+        // fragment_size=200: each fragment carries 200 bytes of user data
+        // 200 + 9 = 209 ≤ 256 ✓
+        // a 600-byte message becomes ceil(600/200) = 3 fragments
+        .{ .kind = .ReliableOrdered, .reliable_buffer = 64, .fragment_size = 200 },
+    },
+};
+
+// send — any size up to 255 × fragment_size bytes (and ≤ 65535 bytes total)
+try srv.sendOnChannel(cid, 0, large_bytes);
+
+// receive — messageData() returns the full assembled slice
+while (cli.peekMessage()) |msg| {
+    const data = cli.messageData(msg); // []const u8, len = original message size
+    cli.consumeMessage();              // frees the assembled buffer
+}
+```
+
+> **Note:** `pollMessage` (copy-out convenience) truncates assembled messages to
+> `max_user_data` bytes. Use the zero-copy `peekMessage` / `messageData` /
+> `consumeMessage` API for fragmented channels.
 
 ---
 
@@ -613,8 +686,9 @@ objects, because the sockets hold interior pointers into it.
 src/
   root.zig              public API re-exports and Options
   packet.zig            wire-format serialization/deserialization
-  channel.zig           channel header encoding, channel kind helpers,
-                        ReliableState, RttState, recv state machines
+  channel.zig           ChannelConfig, ChannelLayout, header encoding,
+                        FragExtra helpers, ReliableState, RttState,
+                        recv state machines
   handshake.zig         HMAC challenge tokens, DefaultConnectToken,
                         validateConnectTokenInterface
   payload_pool.zig      O(1) free-list pool for inbound message bytes
@@ -643,9 +717,9 @@ src/
     udp.zig             built-in non-blocking UDP socket (Windows + POSIX)
     loopback.zig        in-memory LoopbackSocket + Pair for testing
     server.zig          TransportServer — owns socket, drives I/O loop,
-                        per-client RTT tracking
+                        per-client RTT tracking, fragment reassembly
     client.zig          TransportClient — owns socket, drives I/O loop,
-                        per-connection RTT tracking
+                        per-connection RTT tracking, fragment reassembly
 
   validation/
     root.zig            re-exports all validation helpers

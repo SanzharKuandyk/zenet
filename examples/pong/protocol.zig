@@ -11,15 +11,12 @@ pub const net_opts: zenet.Options = .{
     // Each entry in `channels` is one logical stream with its own delivery guarantee.
     // The index becomes the channel_id passed to sendOnChannel / visible in Message.channel_id.
     .channels = &.{
-        .UnreliableLatest, // ch 0 — ball state (server → clients)
-        .UnreliableLatest, // ch 1 — paddle state (server → clients)
-        .ReliableOrdered, // ch 2 — actions/events: slot assignment, game-over, new-game
-        .UnreliableLatest, // ch 3 — player input / heartbeat (client → server)
-        .Unreliable, // ch 4 — chat: fire-and-forget, no retransmit, no ordering guarantee
+        .{ .kind = .UnreliableLatest }, // ch 0 — ball state (server → clients)
+        .{ .kind = .UnreliableLatest }, // ch 1 — paddle state (server → clients)
+        .{ .kind = .ReliableOrdered, .reliable_buffer = 32 }, // ch 2 — actions/events
+        .{ .kind = .UnreliableLatest }, // ch 3 — player input / heartbeat (client → server)
+        .{ .kind = .Unreliable }, // ch 4 — chat: fire-and-forget
     },
-    // How many unACKed reliable messages can be in-flight per channel per peer before
-    // sendOnChannel returns error.ReliableBufferFull.
-    .reliable_buffer = 32,
     // Resend a reliable message if its ACK hasn't arrived within this window.
     .reliable_resend_ns = 80 * std.time.ns_per_ms,
     .messages_queue_size = 128,

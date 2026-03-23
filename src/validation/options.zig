@@ -1,5 +1,6 @@
 const std = @import("std");
 const root = @import("../root.zig");
+const channel_mod = @import("../channel.zig");
 
 fn requirePowerOfTwo(comptime name: []const u8, comptime value: usize) void {
     if (value == 0 or (value & (value - 1)) != 0)
@@ -43,16 +44,22 @@ pub fn validate(comptime opts: root.Options) void {
         if (opts.channels.len > 128)
             @compileError("Options.channels supports at most 128 entries because channel ids share a byte with the ACK flag");
 
-        const has_reliable = blk: {
-            for (opts.channels) |kind| {
-                switch (kind) {
-                    .ReliableOrdered, .ReliableUnordered => break :blk true,
-                    else => {},
-                }
+        for (opts.channels) |ch| {
+            switch (ch.kind) {
+                .ReliableOrdered, .ReliableUnordered => {
+                    if (ch.reliable_buffer == 0)
+                        @compileError("ChannelConfig.reliable_buffer must be greater than zero for reliable channels");
+                },
+                else => {},
             }
-            break :blk false;
-        };
-        if (has_reliable and opts.reliable_buffer == 0)
-            @compileError("Options.reliable_buffer must be greater than zero when using reliable channels");
+            if (ch.fragment_size) |frag_sz| {
+                if (ch.kind == .UnreliableLatest)
+                    @compileError("UnreliableLatest channels do not support fragmentation; use Unreliable instead");
+                if (frag_sz == 0)
+                    @compileError("ChannelConfig.fragment_size must be greater than zero");
+                if (channel_mod.FRAG_HEADER_SIZE + frag_sz > opts.max_payload_size)
+                    @compileError("ChannelConfig.fragment_size + FRAG_HEADER_SIZE exceeds max_payload_size");
+            }
+        }
     }
 }
