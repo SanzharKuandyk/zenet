@@ -158,7 +158,7 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
         events: RingQueue(Event, opts.events_queue_size),
         messages: RingQueue(MessageView, opts.messages_queue_size),
 
-        pub fn init(config: root.ClientConfig, bind_addr: std.net.Address) !Self {
+        pub fn init(config: root.ClientConfig, bind_addr: root.Address) !Self {
             const socket = try Socket.open(bind_addr);
             errdefer {
                 var s = socket;
@@ -187,11 +187,11 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
             self.clearMessages();
             self.resetChannelState();
             self.socket.close();
+            self.cli.deinit();
         }
 
         pub fn tick(self: *Self) void {
-            const now = std.time.Instant.now() catch return;
-            self.cli.update(now);
+            self.cli.updateNow();
             const now_ns = self.cli.getCurrentTime();
 
             self.flushOutgoing();

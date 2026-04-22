@@ -36,8 +36,14 @@ const Srv = zenet.Server(opts);
 const Cli = zenet.Client(opts);
 const Pkt = packet_mod.Packet(opts);
 
-fn testAddr(port: u16) std.net.Address {
-    return std.net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, port);
+fn sleepNs(ns: u64) !void {
+    var io_threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer io_threaded.deinit();
+    try std.Io.sleep(io_threaded.io(), .fromNanoseconds(@intCast(ns)), .awake);
+}
+
+fn testAddr(port: u16) zenet.Address {
+    return .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = port } };
 }
 
 fn serverCfg() zenet.ServerConfig {
@@ -50,7 +56,7 @@ fn clientCfg(port: u16) zenet.ClientConfig {
 
 /// Relay all outgoing packets from `src` to `dst.handlePacket`.
 /// `src_addr` is the address dst will see as the sender.
-fn relayClientToServer(cli: *Cli, srv: *Srv, client_addr: std.net.Address) !void {
+fn relayClientToServer(cli: *Cli, srv: *Srv, client_addr: zenet.Address) !void {
     var buf: [packet_mod.maxPacketSize(opts)]u8 = undefined;
     while (cli.pollOutgoing()) |out| {
         const len = try packet_mod.serialize(opts, out.packet, buf[0..]);
@@ -77,9 +83,8 @@ test "server-client plain connect handshake" {
     var cli = try Cli.init(clientCfg(9001));
 
     const client_addr = testAddr(50001);
-    const now = try std.time.Instant.now();
-    srv.update(now);
-    cli.update(now);
+    srv.updateNow();
+    cli.updateNow();
 
     // Step 1: client sends ConnectionRequest
     try cli.connect();
@@ -113,9 +118,8 @@ test "server disconnects client on Disconnect packet" {
     var cli = try Cli.init(clientCfg(9002));
 
     const client_addr = testAddr(50002);
-    const now = try std.time.Instant.now();
-    srv.update(now);
-    cli.update(now);
+    srv.updateNow();
+    cli.updateNow();
 
     try cli.connect();
     try relayClientToServer(&cli, &srv, client_addr);
@@ -150,9 +154,8 @@ test "server disconnects idle client on timeout" {
     var cli = try Cli.init(clientCfg(9006));
 
     const client_addr = testAddr(50006);
-    const now = try std.time.Instant.now();
-    srv.update(now);
-    cli.update(now);
+    srv.updateNow();
+    cli.updateNow();
 
     try cli.connect();
     try relayClientToServer(&cli, &srv, client_addr);
@@ -166,8 +169,8 @@ test "server disconnects idle client on timeout" {
     const cid = connected.ClientConnected.cid;
     const slot: usize = @intCast(cid);
 
-    std.Thread.sleep(timeout_ns + (1 * std.time.ns_per_ms));
-    srv.update(try std.time.Instant.now());
+    try sleepNs(timeout_ns + (1 * std.time.ns_per_ms));
+    srv.updateNow();
 
     const disconnected = srv.pollEvent().?;
     try testing.expect(disconnected == .ClientDisconnected);
@@ -185,9 +188,8 @@ test "server sendPayload reaches client as message" {
     var cli = try Cli.init(clientCfg(9003));
 
     const client_addr = testAddr(50003);
-    const now = try std.time.Instant.now();
-    srv.update(now);
-    cli.update(now);
+    srv.updateNow();
+    cli.updateNow();
 
     try cli.connect();
     try relayClientToServer(&cli, &srv, client_addr);
@@ -223,9 +225,8 @@ test "client sendPayload reaches server as message" {
     var cli = try Cli.init(clientCfg(9004));
 
     const client_addr = testAddr(50004);
-    const now = try std.time.Instant.now();
-    srv.update(now);
-    cli.update(now);
+    srv.updateNow();
+    cli.updateNow();
 
     try cli.connect();
     try relayClientToServer(&cli, &srv, client_addr);
@@ -292,9 +293,8 @@ test "UnreliableLatest drops older sequence via state machine relay" {
     var cli = try Cli.init(clientCfg(9005));
 
     const client_addr = testAddr(50005);
-    const now = try std.time.Instant.now();
-    srv.update(now);
-    cli.update(now);
+    srv.updateNow();
+    cli.updateNow();
 
     // Connect
     try cli.connect();
@@ -379,8 +379,8 @@ const TSrv = TransportServer(opts, LoopbackSocket);
 const TCli = TransportClient(opts, LoopbackSocket);
 
 /// Addresses used as fake local endpoints for loopback sockets.
-const srv_addr = std.net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, 20000);
-const cli_addr = std.net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, 20001);
+const srv_addr: zenet.Address = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 20000 } };
+const cli_addr: zenet.Address = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 20001 } };
 
 /// Server config suitable for transport-layer tests that run tick() with real time.
 fn transportServerCfg() zenet.ServerConfig {
@@ -590,7 +590,7 @@ test "transport loopback: client ignores packets from non-server address" {
     var cli = try TCli.initWithSocket(loopbackClientCfg(), pair.clientSocket(cli_addr));
     defer cli.deinit();
 
-    var attacker = pair.serverSocket(std.net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, 20002));
+    var attacker = pair.serverSocket(.{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 20002 } });
 
     try cli.connect();
 
@@ -630,7 +630,7 @@ test "transport loopback: reliable retransmit after lost ack does not redeliver"
 
     pair.srv_to_cli = .{}; // drop the first ACK
 
-    std.Thread.sleep(opts.reliable_resend_ns + (20 * std.time.ns_per_ms));
+    try sleepNs(opts.reliable_resend_ns + (20 * std.time.ns_per_ms));
     cli.tick();
     srv.tick();
 
@@ -638,7 +638,7 @@ test "transport loopback: reliable retransmit after lost ack does not redeliver"
 
     cli.tick(); // receive the ACK for the retransmission
 
-    std.Thread.sleep(opts.reliable_resend_ns + (20 * std.time.ns_per_ms));
+    try sleepNs(opts.reliable_resend_ns + (20 * std.time.ns_per_ms));
     cli.tick();
     srv.tick();
 
@@ -671,8 +671,8 @@ test "transport loopback: fragmented ReliableOrdered channel assembles correctly
     const FSrv = TransportServer(frag_opts, LoopbackSocket);
     const FCli = TransportClient(frag_opts, LoopbackSocket);
 
-    const faddr_srv = std.net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, 21000);
-    const faddr_cli = std.net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, 21001);
+    const faddr_srv: zenet.Address = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 21000 } };
+    const faddr_cli: zenet.Address = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 21001 } };
 
     var fpair: LoopbackSocket.Pair = .{};
 

@@ -13,11 +13,17 @@ const Slot = struct {
 
 var slots: [4]Slot = [_]Slot{.{}} ** 4;
 
+fn sleepNs(ns: u64) !void {
+    var io_threaded: std.Io.Threaded = .init(std.heap.page_allocator, .{});
+    defer io_threaded.deinit();
+    try std.Io.sleep(io_threaded.io(), .fromNanoseconds(@intCast(ns)), .awake);
+}
+
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
 
-    const bind = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, proto.SERVER_PORT);
+    const bind: zenet.Address = .{ .ip4 = .unspecified(proto.SERVER_PORT) };
 
     // ServerConfig: protocol_id, handshake_timeout_ns, client_timeout_ns,
     //   public_addresses, secure, challenge_key, secret_key.
@@ -124,6 +130,6 @@ pub fn main() !void {
             srv.consumeMessage();
         }
 
-        std.Thread.sleep(16 * std.time.ns_per_ms);
+        try sleepNs(16 * std.time.ns_per_ms);
     }
 }

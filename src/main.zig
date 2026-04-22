@@ -23,7 +23,7 @@ pub fn main() !void {
         null,
     );
 
-    const bind = try std.net.Address.parseIp4("0.0.0.0", 9000);
+    const bind = try zenet.Address.parseIp4("0.0.0.0", 9000);
     var srv = try Srv.init(allocator, cfg, bind);
     defer srv.deinit();
 

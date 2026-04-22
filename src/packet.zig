@@ -131,7 +131,7 @@ pub fn deserialize(comptime opts: Options, bytes: []const u8) error{ InvalidPack
     if (bytes.len < 2) return error.InvalidPacket;
     if (bytes[0] != PROTOCOL_VERSION) return error.UnsupportedVersion;
 
-    const kind: PacketKind = std.meta.intToEnum(PacketKind, bytes[1]) catch return error.InvalidPacket;
+    const kind = std.enums.fromInt(PacketKind, bytes[1]) orelse return error.InvalidPacket;
     switch (kind) {
         .ConnectionRequestPlain => {
             if (bytes.len != 14) return error.InvalidPacket;

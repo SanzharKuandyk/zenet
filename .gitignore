@@ -1,4 +1,5 @@
 # Zig build outputs
 zig-out/
 .zig-cache/
+zig-pkg/
 .claude/

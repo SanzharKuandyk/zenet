@@ -1,7 +1,8 @@
 const std = @import("std");
+const root = @import("root.zig");
 const AddressKey = @import("addr.zig").AddressKey;
-const SECRET_KEY_SIZE = @import("root.zig").SECRET_KEY_SIZE;
-const CHALLENGE_KEY_SIZE = @import("root.zig").CHALLENGE_KEY_SIZE;
+const SECRET_KEY_SIZE = root.SECRET_KEY_SIZE;
+const CHALLENGE_KEY_SIZE = root.CHALLENGE_KEY_SIZE;
 
 pub const ChallengeToken = [16]u8;
 
@@ -63,7 +64,7 @@ pub fn DefaultConnectToken(comptime user_data_size: usize, comptime max_addresse
         pub fn create(
             client_id: u64,
             expires_at: u64,
-            public_addresses: []const std.net.Address,
+            public_addresses: []const root.Address,
             user_data: [user_data_size]u8,
             secret_key: *const [SECRET_KEY_SIZE]u8,
         ) !Self {
@@ -96,7 +97,7 @@ pub fn DefaultConnectToken(comptime user_data_size: usize, comptime max_addresse
             return std.crypto.timing_safe.eql([16]u8, expected, self.mac);
         }
 
-        pub fn authorizeAddress(self: *const Self, addr: std.net.Address) bool {
+        pub fn authorizeAddress(self: *const Self, addr: root.Address) bool {
             const key = AddressKey.fromAddress(addr);
             for (0..self.address_count) |i| {
                 if (AddressKey.eql(self.public_addresses[i], key)) return true;

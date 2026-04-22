@@ -36,12 +36,12 @@ pub fn Server(comptime opts: Options) type {
         pub const Event = union(enum) {
             ClientConnected: struct {
                 cid: u64,
-                addr: std.net.Address,
+                addr: root.Address,
                 user_data: ?[opts.user_data_size]u8,
             },
             ClientDisconnected: struct {
                 cid: u64,
-                addr: std.net.Address,
+                addr: root.Address,
             },
         };
 
@@ -51,7 +51,7 @@ pub fn Server(comptime opts: Options) type {
         };
 
         pub const Outgoing = struct {
-            addr: std.net.Address,
+            addr: root.Address,
             packet: Pkt,
         };
 
@@ -59,7 +59,7 @@ pub fn Server(comptime opts: Options) type {
         protocol_id: u32,
         secure: bool,
         secret_key: ?[SECRET_KEY_SIZE]u8,
-        public_addresses: []const std.net.Address,
+        public_addresses: []const root.Address,
 
         recent_nonces: RecentNonces(opts.nonce_window),
 
@@ -67,15 +67,16 @@ pub fn Server(comptime opts: Options) type {
         challenge_seq: u64,
 
         config: ServerConfig,
+        io_threaded: std.Io.Threaded,
 
-        start_time: std.time.Instant,
-        current_time: std.time.Instant,
+        start_time: std.Io.Timestamp,
+        current_time: std.Io.Timestamp,
 
         clients: [opts.max_clients]?Conn,
-        addr_to_slot: std.AutoArrayHashMap(AddressKey, usize),
+        addr_to_slot: std.AutoArrayHashMapUnmanaged(AddressKey, usize),
         recycled_slots: RingQueue(u64, pending_cap),
         slot_cursor: u64,
-        pending: std.AutoArrayHashMap(AddressKey, PendingConn),
+        pending: std.AutoArrayHashMapUnmanaged(AddressKey, PendingConn),
 
         outgoing: RingQueue(Outgoing, opts.outgoing_queue_size),
         events: RingQueue(Event, opts.events_queue_size),
@@ -83,7 +84,9 @@ pub fn Server(comptime opts: Options) type {
         payload_pool: Pool,
 
         pub fn init(allocator: std.mem.Allocator, config: ServerConfig) !Self {
-            const now = try std.time.Instant.now();
+            var io_threaded: std.Io.Threaded = .init(allocator, .{});
+            errdefer io_threaded.deinit();
+            const now = std.Io.Timestamp.now(io_threaded.io(), .awake);
             return .{
                 .allocator = allocator,
                 .protocol_id = config.protocol_id,
@@ -94,13 +97,14 @@ pub fn Server(comptime opts: Options) type {
                 .challenge_key = config.challenge_key,
                 .challenge_seq = 0,
                 .config = config,
+                .io_threaded = io_threaded,
                 .start_time = now,
                 .current_time = now,
                 .clients = [_]?Conn{null} ** opts.max_clients,
-                .addr_to_slot = std.AutoArrayHashMap(AddressKey, usize).init(allocator),
+                .addr_to_slot = .empty,
                 .recycled_slots = .{},
                 .slot_cursor = 0,
-                .pending = std.AutoArrayHashMap(AddressKey, PendingConn).init(allocator),
+                .pending = .empty,
                 .outgoing = .{},
                 .events = .{},
                 .messages = .{},
@@ -109,16 +113,17 @@ pub fn Server(comptime opts: Options) type {
         }
 
         pub fn deinit(self: *Self) void {
-            self.addr_to_slot.deinit();
-            self.pending.deinit();
+            self.addr_to_slot.deinit(self.allocator);
+            self.pending.deinit(self.allocator);
             self.recent_nonces.deinit();
+            self.io_threaded.deinit();
         }
 
         pub fn getCurrentTime(self: *const Self) u64 {
-            return self.current_time.since(self.start_time);
+            return @intCast(self.start_time.durationTo(self.current_time).toNanoseconds());
         }
 
-        pub fn update(self: *Self, now: std.time.Instant) void {
+        pub fn update(self: *Self, now: std.Io.Timestamp) void {
             self.current_time = now;
             const t = self.getCurrentTime();
 
@@ -141,6 +146,10 @@ pub fn Server(comptime opts: Options) type {
 
                 self.disconnectClient(slot) catch {};
             }
+        }
+
+        pub fn updateNow(self: *Self) void {
+            self.update(std.Io.Timestamp.now(self.io_threaded.io(), .awake));
         }
 
         pub fn sendPayload(self: *Self, cid: u64, body: []const u8) ServerError!void {
@@ -225,7 +234,7 @@ pub fn Server(comptime opts: Options) type {
             self.outgoing.advance();
         }
 
-        pub fn handlePacket(self: *Self, addr: std.net.Address, buffer: []const u8) (ServerError || error{OutOfMemory})!void {
+        pub fn handlePacket(self: *Self, addr: root.Address, buffer: []const u8) (ServerError || error{OutOfMemory})!void {
             const pkt = packet_mod.deserialize(opts, buffer) catch return error.InvalidPacket;
 
             switch (pkt) {
@@ -282,7 +291,7 @@ pub fn Server(comptime opts: Options) type {
                         expires_at,
                     );
 
-                    try self.pending.put(key, .{
+                    try self.pending.put(self.allocator, key, .{
                         .cid = cid,
                         .client_nonce = fields.client_nonce,
                         .sequence = self.challenge_seq,
@@ -327,7 +336,7 @@ pub fn Server(comptime opts: Options) type {
                         .last_send = 0,
                         .user_data = pending.user_data,
                     };
-                    try self.addr_to_slot.put(key, slot);
+                    try self.addr_to_slot.put(self.allocator, key, slot);
 
                     if (!self.outgoing.pushBack(.{
                         .addr = addr,

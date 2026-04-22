@@ -28,12 +28,20 @@ var vel_y: f32 = proto.BALL_SPEED * 0.6;
 var score: [2]u8 = .{ 0, 0 };
 var game_over: bool = false;
 
+fn sleepNs(ns: u64) !void {
+    var io_threaded: std.Io.Threaded = .init(std.heap.page_allocator, .{});
+    defer io_threaded.deinit();
+    try std.Io.sleep(io_threaded.io(), .fromNanoseconds(@intCast(ns)), .awake);
+}
+
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
+    var io_threaded: std.Io.Threaded = .init(alloc, .{});
+    defer io_threaded.deinit();
 
-    const bind = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, proto.SERVER_PORT);
+    const bind: zenet.Address = .{ .ip4 = .unspecified(proto.SERVER_PORT) };
 
     // ServerConfig.init(protocol_id, handshake_alive_ns, client_timeout_ns,
     //   public_addresses, secure, challenge_key, secret_key)
@@ -56,13 +64,15 @@ pub fn main() !void {
 
     std.debug.print("Pong server listening on :{d}\n", .{proto.SERVER_PORT});
 
-    var timer = try std.time.Timer.start();
+    var prev_tick = std.Io.Timestamp.now(io_threaded.io(), .awake);
     var prev_both_connected = false;
 
     while (true) {
-        const dt_ns = timer.lap();
+        const now = std.Io.Timestamp.now(io_threaded.io(), .awake);
+        const dt_ns = prev_tick.durationTo(now).toNanoseconds();
+        prev_tick = now;
         const dt: f32 = @as(f32, @floatFromInt(dt_ns)) / @as(f32, @floatFromInt(std.time.ns_per_s));
-        const now_ms = std.time.milliTimestamp();
+        const now_ms = now.toMilliseconds();
 
         // tick() drives one iteration: recv all pending datagrams → run state machine
         // → retransmit unACKed reliable messages → flush outgoing packets.
@@ -246,7 +256,7 @@ pub fn main() !void {
             }
         }
 
-        std.Thread.sleep(16 * std.time.ns_per_ms);
+        try sleepNs(16 * std.time.ns_per_ms);
     }
 }
 

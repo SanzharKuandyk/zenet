@@ -1,4 +1,5 @@
 const std = @import("std");
+const Address = std.Io.net.IpAddress;
 
 pub const AddressKey = struct {
     pub const WIRE_SIZE: usize = 18;
@@ -6,27 +7,24 @@ pub const AddressKey = struct {
     ip: [16]u8, // IPv4 mapped into IPv6 or raw IPv6
     port: u16,
 
-    pub fn fromAddress(addr: std.net.Address) AddressKey {
+    pub fn fromAddress(addr: Address) AddressKey {
         var out: AddressKey = .{
             .ip = [_]u8{0} ** 16,
             .port = 0,
         };
 
-        switch (addr.any.family) {
-            std.posix.AF.INET => {
+        switch (addr) {
+            .ip4 => |a| {
                 // 0000:0000:0000:0000:0000:ffff:XXXX:XXXX
-                const a = addr.in;
                 out.ip[10] = 0xff;
                 out.ip[11] = 0xff;
-                @memcpy(out.ip[12..16], std.mem.asBytes(&a.sa.addr));
-                out.port = std.mem.bigToNative(u16, a.sa.port);
+                @memcpy(out.ip[12..16], a.bytes[0..]);
+                out.port = a.port;
             },
-            std.posix.AF.INET6 => {
-                const a = addr.in6;
-                @memcpy(out.ip[0..16], &a.sa.addr);
-                out.port = std.mem.bigToNative(u16, a.sa.port);
+            .ip6 => |a| {
+                @memcpy(out.ip[0..16], a.bytes[0..]);
+                out.port = a.port;
             },
-            else => unreachable,
         }
 
         return out;

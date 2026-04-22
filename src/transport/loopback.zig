@@ -19,6 +19,7 @@
 ///   while (not_connected) { cli_transport.tick(); srv_transport.tick(); }
 ///
 const std = @import("std");
+const Address = @import("../root.zig").Address;
 pub const RecvResult = @import("socket.zig").RecvResult;
 
 /// Maximum packet bytes that fit in a single loopback queue entry.
@@ -36,7 +37,7 @@ const Entry = struct {
     data: [MAX_PACKET]u8 = undefined,
     len: usize = 0,
     /// The source address stored by the sender (its own local_addr).
-    src: std.net.Address = undefined,
+    src: Address = undefined,
 };
 
 const Queue = struct {
@@ -45,7 +46,7 @@ const Queue = struct {
     tail: usize = 0,
     count: usize = 0,
 
-    fn push(self: *Queue, src: std.net.Address, data: []const u8) void {
+    fn push(self: *Queue, src: Address, data: []const u8) void {
         if (self.count >= QUEUE_CAP) return; // silently drop when full
         const len = @min(data.len, MAX_PACKET);
         const e = &self.entries[self.tail];
@@ -75,7 +76,7 @@ pub const LoopbackSocket = struct {
     /// Packets this socket receives come from here (the other side's send).
     recv_queue: *Queue,
     /// This socket's "own" address, stamped as the source on every sendto.
-    local_addr: std.net.Address,
+    local_addr: Address,
 
     // ------------------------------------------------------------------
     // SocketType interface
@@ -83,7 +84,7 @@ pub const LoopbackSocket = struct {
 
     /// Satisfies the interface signature but always returns an error.
     /// Use `Pair.serverSocket` / `Pair.clientSocket` to create connected sockets.
-    pub fn open(addr: std.net.Address) !LoopbackSocket {
+    pub fn open(addr: Address) !LoopbackSocket {
         _ = addr;
         return error.NotSupported;
     }
@@ -101,7 +102,7 @@ pub const LoopbackSocket = struct {
 
     /// `addr` is the destination; for loopback we ignore it and stamp
     /// `local_addr` as the source so the other side identifies us correctly.
-    pub fn sendto(self: *LoopbackSocket, addr: std.net.Address, data: []const u8) void {
+    pub fn sendto(self: *LoopbackSocket, addr: Address, data: []const u8) void {
         _ = addr;
         self.send_queue.push(self.local_addr, data);
     }
@@ -118,7 +119,7 @@ pub const LoopbackSocket = struct {
 
         /// Returns a `LoopbackSocket` representing the server side.
         /// `local_addr` will be reported as the source address to the client.
-        pub fn serverSocket(self: *Pair, local_addr: std.net.Address) LoopbackSocket {
+        pub fn serverSocket(self: *Pair, local_addr: Address) LoopbackSocket {
             return .{
                 .send_queue = &self.srv_to_cli,
                 .recv_queue = &self.cli_to_srv,
@@ -128,7 +129,7 @@ pub const LoopbackSocket = struct {
 
         /// Returns a `LoopbackSocket` representing the client side.
         /// `local_addr` will be reported as the source address to the server.
-        pub fn clientSocket(self: *Pair, local_addr: std.net.Address) LoopbackSocket {
+        pub fn clientSocket(self: *Pair, local_addr: Address) LoopbackSocket {
             return .{
                 .send_queue = &self.cli_to_srv,
                 .recv_queue = &self.srv_to_cli,

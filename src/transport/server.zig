@@ -124,12 +124,12 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
         pub const Event = union(enum) {
             ClientConnected: struct {
                 cid: u64,
-                addr: std.net.Address,
+                addr: root.Address,
                 user_data: ?[opts.user_data_size]u8,
             },
             ClientDisconnected: struct {
                 cid: u64,
-                addr: std.net.Address,
+                addr: root.Address,
             },
         };
 
@@ -166,7 +166,7 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
         events: RingQueue(Event, opts.events_queue_size),
         messages: RingQueue(MessageView, opts.messages_queue_size),
 
-        pub fn init(allocator: std.mem.Allocator, config: root.ServerConfig, bind_addr: std.net.Address) !Self {
+        pub fn init(allocator: std.mem.Allocator, config: root.ServerConfig, bind_addr: root.Address) !Self {
             const socket = try Socket.open(bind_addr);
             errdefer {
                 var s = socket;
@@ -228,8 +228,7 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
         }
 
         pub fn tick(self: *Self) void {
-            const now = std.time.Instant.now() catch return;
-            self.srv.update(now);
+            self.srv.updateNow();
             const now_ns = self.srv.getCurrentTime();
 
             var buf: [max_packet_size]u8 = undefined;

@@ -33,7 +33,7 @@ pub fn Client(comptime opts: Options) type {
         };
 
         pub const Outgoing = struct {
-            addr: std.net.Address,
+            addr: root.Address,
             packet: Pkt,
         };
 
@@ -47,9 +47,10 @@ pub fn Client(comptime opts: Options) type {
         last_handshake_send: u64,
         has_handshake_send: bool,
         last_recv: u64,
+        io_threaded: std.Io.Threaded,
 
-        start_time: std.time.Instant,
-        current_time: std.time.Instant,
+        start_time: std.Io.Timestamp,
+        current_time: std.Io.Timestamp,
 
         outgoing: RingQueue(Outgoing, opts.outgoing_queue_size),
         events: RingQueue(Event, opts.events_queue_size),
@@ -57,7 +58,9 @@ pub fn Client(comptime opts: Options) type {
         payload_pool: Pool,
 
         pub fn init(config: ClientConfig) !Self {
-            const now = try std.time.Instant.now();
+            var io_threaded: std.Io.Threaded = .init(std.heap.page_allocator, .{});
+            errdefer io_threaded.deinit();
+            const now = std.Io.Timestamp.now(io_threaded.io(), .awake);
             return .{
                 .state = .Disconnected,
                 .config = config,
@@ -68,6 +71,7 @@ pub fn Client(comptime opts: Options) type {
                 .last_handshake_send = 0,
                 .has_handshake_send = false,
                 .last_recv = 0,
+                .io_threaded = io_threaded,
                 .start_time = now,
                 .current_time = now,
                 .outgoing = .{},
@@ -78,10 +82,10 @@ pub fn Client(comptime opts: Options) type {
         }
 
         pub fn getCurrentTime(self: *const Self) u64 {
-            return self.current_time.since(self.start_time);
+            return @intCast(self.start_time.durationTo(self.current_time).toNanoseconds());
         }
 
-        pub fn update(self: *Self, now: std.time.Instant) void {
+        pub fn update(self: *Self, now: std.Io.Timestamp) void {
             self.current_time = now;
             const t = self.getCurrentTime();
             switch (self.state) {
@@ -97,9 +101,13 @@ pub fn Client(comptime opts: Options) type {
             }
         }
 
+        pub fn updateNow(self: *Self) void {
+            self.update(std.Io.Timestamp.now(self.io_threaded.io(), .awake));
+        }
+
         pub fn connect(self: *Self) ClientError!void {
             if (self.state != .Disconnected) return error.InvalidState;
-            self.client_nonce = std.crypto.random.int(u64);
+            self.io_threaded.io().random(std.mem.asBytes(&self.client_nonce));
             self.secure_token = null;
             self.pending_response = null;
             self.connect_started_at = self.getCurrentTime();
@@ -114,7 +122,7 @@ pub fn Client(comptime opts: Options) type {
 
         pub fn connectSecure(self: *Self, token: ConnectTokenType) ClientError!void {
             if (self.state != .Disconnected) return error.InvalidState;
-            self.client_nonce = std.crypto.random.int(u64);
+            self.io_threaded.io().random(std.mem.asBytes(&self.client_nonce));
             self.secure_token = token;
             self.pending_response = null;
             self.connect_started_at = self.getCurrentTime();
@@ -255,6 +263,10 @@ pub fn Client(comptime opts: Options) type {
 
         pub fn payloadData(self: *const Self, ref: Pool.Ref) []const u8 {
             return self.payload_pool.slice(ref);
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.io_threaded.deinit();
         }
 
         fn updateHandshake(self: *Self, now: u64) void {

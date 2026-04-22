@@ -31,10 +31,10 @@ var chat_input: [proto.MAX_CHAT]u8 = undefined;
 var chat_input_len: usize = 0;
 var chat_active = false;
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     var server_ip: [4]u8 = .{ 127, 0, 0, 1 };
     {
-        var args = try std.process.argsWithAllocator(std.heap.page_allocator);
+        var args = try std.process.Args.iterateAllocator(init.minimal.args, init.gpa);
         defer args.deinit();
         _ = args.next();
         if (args.next()) |s| server_ip = parseIp4(s) orelse .{ 127, 0, 0, 1 };
@@ -42,7 +42,7 @@ pub fn main() !void {
 
     const config: zenet.ClientConfig = .{
         .protocol_id = proto.PROTOCOL_ID,
-        .server_addr = std.net.Address.initIp4(server_ip, proto.SERVER_PORT),
+        .server_addr = .{ .ip4 = .{ .bytes = server_ip, .port = proto.SERVER_PORT } },
         // How long to wait for the handshake before giving up.
         .connect_timeout_ns = 10 * std.time.ns_per_s,
         // How long without a packet before the state machine fires Disconnected.
@@ -50,7 +50,7 @@ pub fn main() !void {
     };
 
     // init opens and binds a UDP socket. Port 0 lets the OS pick a free port.
-    var cli = try Cli.init(config, std.net.Address.initIp4(.{ 0, 0, 0, 0 }, 0));
+    var cli = try Cli.init(config, .{ .ip4 = .unspecified(0) });
     defer cli.deinit();
     // Best-effort clean disconnect: sends a Disconnect packet so the server frees
     // the slot immediately rather than waiting for the heartbeat timeout.

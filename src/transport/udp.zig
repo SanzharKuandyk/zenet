@@ -1,80 +1,186 @@
 const std = @import("std");
-const builtin = @import("builtin");
-const native_os = builtin.os.tag;
 const RecvResult = @import("socket.zig").RecvResult;
+const Address = @import("../root.zig").Address;
+const builtin = @import("builtin");
+
+const is_windows = builtin.os.tag == .windows;
+
+const Threaded = std.Io.Threaded;
+
+const WindowsUdpSocket = if (is_windows) struct {
+    const ws2_32 = std.os.windows.ws2_32;
+    const c = struct {
+        extern "ws2_32" fn socket(af: c_int, kind: c_int, protocol: c_int) callconv(.winapi) Handle;
+        extern "ws2_32" fn bind(sockfd: Handle, addr: *const ws2_32.sockaddr, addrlen: ws2_32.socklen_t) callconv(.winapi) c_int;
+        extern "ws2_32" fn closesocket(sockfd: Handle) callconv(.winapi) c_int;
+        extern "ws2_32" fn ioctlsocket(sockfd: Handle, cmd: i32, argp: *u32) callconv(.winapi) c_int;
+        extern "ws2_32" fn sendto(
+            sockfd: Handle,
+            buf: [*]const u8,
+            len: c_int,
+            flags: c_int,
+            dest_addr: *const ws2_32.sockaddr,
+            addrlen: ws2_32.socklen_t,
+        ) callconv(.winapi) c_int;
+        extern "ws2_32" fn recvfrom(
+            sockfd: Handle,
+            buf: [*]u8,
+            len: c_int,
+            flags: c_int,
+            src_addr: *ws2_32.sockaddr,
+            addrlen: *ws2_32.socklen_t,
+        ) callconv(.winapi) c_int;
+    };
+
+    const Handle = usize;
+    const INVALID_SOCKET = std.math.maxInt(Handle);
+    const SOCKET_ERROR = -1;
+    const WSAEWOULDBLOCK = 10035;
+    const FIONBIO: i32 = @bitCast(@as(u32, 0x8004667e));
+
+    const WSAData = extern struct {
+        version: u16,
+        high_version: u16,
+        description: [257]u8,
+        system_status: [129]u8,
+        max_sockets: u16,
+        max_udp_dg: u16,
+        vendor_info: ?[*:0]u8,
+    };
+
+    extern "ws2_32" fn WSAStartup(version_requested: u16, data: *WSAData) callconv(.winapi) c_int;
+    extern "ws2_32" fn WSACleanup() callconv(.winapi) c_int;
+    extern "ws2_32" fn WSAGetLastError() callconv(.winapi) c_int;
+    pub fn init(addr: Address) !WindowsUdpSocket {
+        var wsa_data: WSAData = undefined;
+        if (WSAStartup(0x0202, &wsa_data) != 0) return error.SocketInitFailed;
+        errdefer _ = WSACleanup();
+
+        const family: c_int = switch (addr) {
+            .ip4 => ws2_32.AF.INET,
+            .ip6 => ws2_32.AF.INET6,
+        };
+        const handle = c.socket(family, ws2_32.SOCK.DGRAM, ws2_32.IPPROTO.UDP);
+        if (handle == INVALID_SOCKET) return error.SocketOpenFailed;
+        errdefer _ = c.closesocket(handle);
+
+        var nonblocking: u32 = 1;
+        if (c.ioctlsocket(handle, FIONBIO, &nonblocking) == SOCKET_ERROR)
+            return error.SocketNonblockingFailed;
+
+        var storage: Threaded.PosixAddress = undefined;
+        const addrlen: ws2_32.socklen_t = @intCast(Threaded.addressToPosix(&addr, &storage));
+        if (c.bind(handle, @ptrCast(&storage.any), addrlen) == SOCKET_ERROR)
+            return error.SocketBindFailed;
+
+        return .{ .handle = handle };
+    }
+
+    pub fn deinit(self: *WindowsUdpSocket) void {
+        _ = c.closesocket(self.handle);
+        _ = WSACleanup();
+    }
+
+    pub fn recvfrom(self: *WindowsUdpSocket, buf: []u8) ?RecvResult {
+        var storage: Threaded.PosixAddress = undefined;
+        var addrlen: ws2_32.socklen_t = @sizeOf(Threaded.PosixAddress);
+        const len = c.recvfrom(
+            self.handle,
+            buf.ptr,
+            std.math.cast(c_int, buf.len) orelse return null,
+            0,
+            @ptrCast(&storage.any),
+            &addrlen,
+        );
+        if (len == SOCKET_ERROR) {
+            if (WSAGetLastError() == WSAEWOULDBLOCK) return null;
+            return null;
+        }
+
+        return .{
+            .addr = Threaded.addressFromPosix(&storage),
+            .len = @intCast(len),
+        };
+    }
+
+    pub fn sendto(self: *WindowsUdpSocket, addr: Address, data: []const u8) void {
+        var storage: Threaded.PosixAddress = undefined;
+        const addrlen: ws2_32.socklen_t = @intCast(Threaded.addressToPosix(&addr, &storage));
+        _ = c.sendto(
+            self.handle,
+            data.ptr,
+            std.math.cast(c_int, data.len) orelse return,
+            0,
+            @ptrCast(&storage.any),
+            addrlen,
+        );
+    }
+
+    handle: Handle,
+} else void;
 
 pub const UdpSocket = struct {
-    fd: std.posix.socket_t,
+    io_threaded: if (is_windows) void else std.Io.Threaded,
+    socket: if (is_windows) WindowsUdpSocket else std.Io.net.Socket,
 
-    pub fn open(addr: std.net.Address) !UdpSocket {
-        const flags: u32 = std.posix.SOCK.DGRAM | std.posix.SOCK.NONBLOCK;
-        const fd = try std.posix.socket(addr.any.family, flags, std.posix.IPPROTO.UDP);
-        errdefer {
-            if (native_os == .windows) {
-                std.os.windows.closesocket(fd) catch {};
-            } else {
-                std.posix.close(fd);
-            }
+    pub fn open(addr: Address) !UdpSocket {
+        if (comptime is_windows) {
+            return .{
+                .io_threaded = {},
+                .socket = try WindowsUdpSocket.init(addr),
+            };
         }
-        try std.posix.bind(fd, &addr.any, addr.getOsSockLen());
-        return .{ .fd = fd };
+
+        var io_threaded: std.Io.Threaded = .init(std.heap.page_allocator, .{});
+        errdefer io_threaded.deinit();
+
+        const socket = try addr.bind(io_threaded.io(), .{
+            .mode = .dgram,
+        });
+
+        return .{
+            .io_threaded = io_threaded,
+            .socket = socket,
+        };
     }
 
     pub fn close(self: *UdpSocket) void {
-        if (native_os == .windows) {
-            std.os.windows.closesocket(self.fd) catch {};
-        } else {
-            std.posix.close(self.fd);
+        if (comptime is_windows) {
+            self.socket.deinit();
+            return;
         }
+
+        self.socket.close(self.io_threaded.io());
+        self.io_threaded.deinit();
     }
 
     pub fn recvfrom(self: *UdpSocket, buf: []u8) ?RecvResult {
-        if (native_os == .windows) {
-            return recvfromWindows(self, buf);
-        } else {
-            return recvfromPosix(self, buf);
+        if (comptime is_windows) {
+            return self.socket.recvfrom(buf);
         }
-    }
 
-    pub fn sendto(self: *UdpSocket, addr: std.net.Address, data: []const u8) void {
-        if (native_os == .windows) {
-            sendtoWindows(self, addr, data);
-        } else {
-            sendtoPosix(self, addr, data);
-        }
-    }
+        var message = std.Io.net.IncomingMessage.init;
+        const maybe_err, const count = self.socket.receiveManyTimeout(
+            self.io_threaded.io(),
+            (&message)[0..1],
+            buf,
+            .{},
+            .{ .duration = .{ .clock = .awake, .raw = .fromNanoseconds(0) } },
+        );
+        if (maybe_err != null or count == 0) return null;
 
-    fn recvfromPosix(self: *UdpSocket, buf: []u8) ?RecvResult {
-        var src_addr: std.posix.sockaddr = undefined;
-        var addrlen: std.posix.socklen_t = @sizeOf(std.posix.sockaddr);
-        const n = std.posix.recvfrom(self.fd, buf, 0, &src_addr, &addrlen) catch return null;
         return .{
-            .addr = std.net.Address{ .any = src_addr },
-            .len = n,
+            .addr = message.from,
+            .len = message.data.len,
         };
     }
 
-    fn sendtoPosix(self: *UdpSocket, addr: std.net.Address, data: []const u8) void {
-        _ = std.posix.sendto(self.fd, data, 0, &addr.any, addr.getOsSockLen()) catch {};
-    }
+    pub fn sendto(self: *UdpSocket, addr: Address, data: []const u8) void {
+        if (comptime is_windows) {
+            self.socket.sendto(addr, data);
+            return;
+        }
 
-    fn recvfromWindows(self: *UdpSocket, buf: []u8) ?RecvResult {
-        const ws2_32 = std.os.windows.ws2_32;
-        var src_addr: std.posix.sockaddr = undefined;
-        var addrlen: i32 = @sizeOf(std.posix.sockaddr);
-        const len: i32 = @intCast(@min(buf.len, std.math.maxInt(i32)));
-        const rc = ws2_32.recvfrom(self.fd, buf.ptr, len, 0, &src_addr, &addrlen);
-        if (rc == ws2_32.SOCKET_ERROR) return null;
-        return .{
-            .addr = std.net.Address{ .any = src_addr },
-            .len = @intCast(rc),
-        };
-    }
-
-    fn sendtoWindows(self: *UdpSocket, addr: std.net.Address, data: []const u8) void {
-        const ws2_32 = std.os.windows.ws2_32;
-        const len: i32 = @intCast(@min(data.len, std.math.maxInt(i32)));
-        const addrlen: i32 = @intCast(addr.getOsSockLen());
-        _ = ws2_32.sendto(self.fd, data.ptr, len, 0, &addr.any, addrlen);
+        self.socket.send(self.io_threaded.io(), &addr, data) catch {};
     }
 };

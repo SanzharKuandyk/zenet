@@ -2,6 +2,7 @@ const std = @import("std");
 
 pub const SECRET_KEY_SIZE = 32;
 pub const CHALLENGE_KEY_SIZE = 32;
+pub const Address = std.Io.net.IpAddress;
 
 pub const handshake = @import("handshake.zig");
 
