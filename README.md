@@ -8,7 +8,7 @@ Connection-oriented game networking library for Zig. Provides a
 challenge-response handshake (HMAC-SHA256) and a channel system on top of
 unreliable UDP. Inspired by [renet](https://github.com/lucaspoffo/renet).
 
-**Requires Zig 0.15.2**
+**Requires Zig 0.16.0**
 
 ---
 
@@ -62,6 +62,10 @@ Controls: `W`/`S` to move · `T` to chat · `Space` to ready up after a round
 
 ## Quick start
 
+Most of the Zig 0.16 migration is internal. From the user side, the main
+visible change is that addresses are now `zenet.Address` (an alias for
+`std.Io.net.IpAddress`), while the transport and channel APIs stay the same.
+
 ```zig
 const zenet = @import("zenet");
 const std   = @import("std");
@@ -89,7 +93,7 @@ var srv = try Srv.init(allocator, zenet.ServerConfig.init(
     false,                      // secure
     [_]u8{0} ** 32,             // challenge key
     null,                       // secret key (secure mode only)
-), try std.net.Address.parseIp4("0.0.0.0", 9000));
+), try zenet.Address.parseIp4("0.0.0.0", 9000));
 defer srv.deinit();
 
 // game loop
@@ -117,7 +121,7 @@ const Cli = zenet.TransportClient(opts, void);
 
 var cli = try Cli.init(
     .{ .protocol_id = 1, .server_addr = server_addr },
-    try std.net.Address.parseIp4("0.0.0.0", 0),
+    try zenet.Address.parseIp4("0.0.0.0", 0),
 );
 defer cli.deinit();
 
@@ -316,7 +320,7 @@ while (srv.pollEvent()) |ev| {
     switch (ev) {
         .ClientConnected => |e| {
             // e.cid       : u64           — stable slot index, 0-based
-            // e.addr      : std.net.Address
+            // e.addr      : zenet.Address
             // e.user_data : ?[opts.user_data_size]u8  (null if plain connect)
         },
         .ClientDisconnected => |e| {
@@ -392,7 +396,7 @@ const cfg = zenet.ServerConfig.init(
     protocol_id,          // u32  — must match client
     handshake_alive_ns,   // u64  — ns; pending handshake lifetime
     client_timeout_ns,    // u64  — ns; idle disconnect threshold
-    public_addresses,     // []const std.net.Address  (secure mode)
+    public_addresses,     // []const zenet.Address  (secure mode)
     secure,               // bool — require signed ConnectToken
     challenge_key,        // [32]u8
     secret_key,           // ?[32]u8  (required when secure = true)
@@ -422,7 +426,7 @@ is wrong:
 ```zig
 const MySocket = struct {
     // Called by TransportServer/Client.init to bind the socket.
-    pub fn open(addr: std.net.Address) !MySocket { ... }
+    pub fn open(addr: zenet.Address) !MySocket { ... }
 
     // Called by deinit.
     pub fn close(self: *MySocket) void { ... }
@@ -430,12 +434,12 @@ const MySocket = struct {
     // Non-blocking receive.  Return null when no datagram is available.
     // The returned struct must have exactly these two fields with these types.
     pub fn recvfrom(self: *MySocket, buf: []u8) ?struct {
-        addr: std.net.Address,
+        addr: zenet.Address,
         len:  usize,
     } { ... }
 
     // Fire-and-forget send.
-    pub fn sendto(self: *MySocket, addr: std.net.Address, data: []const u8) void { ... }
+    pub fn sendto(self: *MySocket, addr: zenet.Address, data: []const u8) void { ... }
 };
 
 const Srv = zenet.TransportServer(opts, MySocket);
@@ -444,12 +448,12 @@ const Srv = zenet.TransportServer(opts, MySocket);
 What the compiler checks (examples of the errors you get when wrong):
 
 ```
-Socket missing: pub fn open(std.net.Address) !MySocket
-Socket.open parameter must be std.net.Address, got u16
+Socket missing: pub fn open(zenet.Address) !MySocket
+Socket.open parameter must be zenet.Address, got u16
 Socket.open error-union payload must be MySocket, got void
 Socket.close must return void, got u32
 Socket.recvfrom must return an optional (?RecvResult)
-Socket.recvfrom result .addr must be std.net.Address
+Socket.recvfrom result .addr must be zenet.Address
 Socket.sendto third parameter must be []const u8, got []u8
 ```
 
@@ -482,7 +486,7 @@ const token = try zenet.handshake.DefaultConnectToken(
 ).create(
     client_id,
     expires_at,       // absolute ns timestamp
-    public_addresses, // []const std.net.Address
+    public_addresses, // []const zenet.Address
     user_data,        // [opts.user_data_size]u8
     &secret_key,
 );
@@ -514,7 +518,7 @@ const MyToken = struct {
 
     pub fn authorizeAddress(
         self: *const MyToken,
-        addr: std.net.Address,
+        addr: zenet.Address,
     ) bool { ... }
 };
 ```
@@ -525,14 +529,14 @@ Errors emitted when the interface is wrong:
 ConnectToken must have: pub const wire_size: usize
 ConnectToken must have: pub fn encode(*const @This(), *[wire_size]u8) void
 ConnectToken must have: pub fn decode(*const [wire_size]u8) ?@This()
-ConnectToken must have: pub fn authorizeAddress(*const @This(), std.net.Address) bool
+ConnectToken must have: pub fn authorizeAddress(*const @This(), zenet.Address) bool
 ```
 
 ---
 
 ## Raw state machines
 
-`zenet.Server` and `zenet.Client` are pure state machines with no I/O — drive
+`zenet.Server` and `zenet.Client` are socket-agnostic state machines — drive
 the socket yourself if you need full control over when packets are sent.
 
 ### Server
@@ -544,7 +548,7 @@ var srv = try Srv.init(allocator, config);
 defer srv.deinit();
 
 // each tick
-srv.update(try std.time.Instant.now());
+srv.updateNow();
 
 // feed a received datagram
 try srv.handlePacket(source_addr, datagram_bytes);
@@ -552,7 +556,7 @@ try srv.handlePacket(source_addr, datagram_bytes);
 // drain outgoing — zero-copy peek/consume pattern
 while (srv.peekOutgoing()) |out| {
     // out : *const Outgoing — points into the ring buffer
-    // out.addr   : std.net.Address
+    // out.addr   : zenet.Address
     // out.packet : Packet(opts)
     udp_send(out.addr, out.packet);
     srv.consumeOutgoing();
@@ -604,7 +608,7 @@ var cli = try Cli.init(.{ .protocol_id = 1, .server_addr = server_addr });
 try cli.connect(); // or cli.connectSecure(token)
 
 // each tick
-cli.update(try std.time.Instant.now());
+cli.updateNow();
 
 try cli.handlePacket(datagram_bytes);
 
@@ -655,8 +659,8 @@ const LoopbackSocket = zenet.LoopbackSocket;
 
 var pair: LoopbackSocket.Pair = .{};
 
-const srv_addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 9000);
-const cli_addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 9001);
+const srv_addr = try zenet.Address.parseIp4("127.0.0.1", 9000);
+const cli_addr = try zenet.Address.parseIp4("127.0.0.1", 9001);
 
 var srv = try zenet.TransportServer(opts, LoopbackSocket)
     .initWithSocket(allocator, server_config, pair.serverSocket(srv_addr));
@@ -714,7 +718,7 @@ src/
 
   transport/
     socket.zig          RecvResult type + validateSocketInterface
-    udp.zig             built-in non-blocking UDP socket (Windows + POSIX)
+    udp.zig             thin built-in UDP adapter selector
     loopback.zig        in-memory LoopbackSocket + Pair for testing
     server.zig          TransportServer — owns socket, drives I/O loop,
                         per-client RTT tracking, fragment reassembly
