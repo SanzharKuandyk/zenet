@@ -1,5 +1,9 @@
 # zenet
 
+
+> **Ai assisted** — Well state machines and some transport was written by me, other parts were later done by ai with my view on things (I reviewed and tested). 
+Originally was developing just to get a grasp on how architecture works(Though i do not mean that current architecture is correct one).
+
 > **Experimental** — API is unstable and subject to change.
 
 > **Not an ENet binding.** If you are looking for Zig bindings to the ENet C library, see [znet](https://github.com/connellr023/znet).
